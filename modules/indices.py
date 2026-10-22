@@ -94,6 +94,15 @@ INDEX_INFO = {
     'ИЖ32': ('Дней с индексом жары ≥ 32 °C', 'дни', 'Жара'),
     'ИЖ41': ('Дней с индексом жары ≥ 41 °C', 'дни', 'Жара'),
     'ИЖ_макс': ('Максимум индекса жары', '°C', 'Жара'),
+    'Снег_дней': ('Дней со снежным покровом', 'дни', 'Снег'),
+    'Снег_макс': ('Наибольшая высота снежного покрова', 'см', 'Снег'),
+    'Метель_дней': ('Дней с метелью', 'дни', 'Явления'),
+    'Гроза_дней': ('Дней с грозой', 'дни', 'Явления'),
+    'Туман_дней': ('Дней с туманом', 'дни', 'Явления'),
+    'Град_дней': ('Дней с градом', 'дни', 'Явления'),
+    'Гололёд_дней': ('Дней с гололёдом', 'дни', 'Явления'),
+    'Порыв15_дней': ('Дней с порывом ветра ≥ 15 м/с', 'дни', 'Ветер'),
+    'Порыв_макс': ('Максимальный порыв ветра за год', 'м/с', 'Ветер'),
     'Пож4': ('Дней с классом пожарной опасности ≥ 4', 'дни', 'Пожарная опасность'),
     'Пож5': ('Дней с 5-м классом пожарной опасности', 'дни', 'Пожарная опасность'),
     'Пож4_макс_длит': ('Наибольшая длительность периода с классом ≥ 4', 'дни', 'Пожарная опасность'),
@@ -119,9 +128,21 @@ def build_daily(data, humidity=None):
             parts.append(d[['st', 'date'] + [c for c in cols if c in d.columns]].set_index(['st', 'date']))
     if humidity is not None and not humidity.empty:
         parts.append(humidity.set_index(['st', 'date']))
+    if 'DY' in data:
+        # прочие суточные характеристики из таблиц Excel (влажность, снег, явления, порыв)
+        parts.append(data['DY'].drop(columns=['region'], errors='ignore').set_index(['st', 'date']))
     if not parts:
         return pd.DataFrame()
-    D = pd.concat(parts, axis=1).reset_index()
+    D = pd.concat(parts, axis=1)
+    if D.columns.duplicated().any():
+        # одинаковые показатели из разных источников (например, RH по срокам и из таблиц):
+        # берётся первое непустое значение
+        merged = {}
+        for c in dict.fromkeys(D.columns):
+            sub = D.loc[:, D.columns == c]
+            merged[c] = sub.bfill(axis=1).iloc[:, 0] if sub.shape[1] > 1 else sub.iloc[:, 0]
+        D = pd.DataFrame(merged, index=D.index)
+    D = D.reset_index()
     region = pd.concat([d.groupby('st')['region'].first() for d in data.values()]).groupby(level=0).first()
     D['region'] = D['st'].map(region)
     # непрерывный ряд дат для каждой станции
@@ -480,6 +501,23 @@ def annual_indices(D, dry_mm=None):
                 add(st, rg, yr, 'ИЖ_макс', np.nanmax(h) if np.isfinite(h).any() else np.nan)
             if not se.empty:
                 add(st, rg, yr, 'Суховей_случаев', int(((se['st'] == st) & (se['Начало'].dt.year == yr)).sum()))
+        # таблицы Excel: снег, явления, порывы (год учитывается при полноте ≥ 90 %)
+        for col, code, how in [('snow_depth', 'Снег_дней', 'days_pos'), ('snow_depth', 'Снег_макс', 'max'),
+                               ('n_blizzard', 'Метель_дней', 'days'), ('n_thunder', 'Гроза_дней', 'days'),
+                               ('n_fog', 'Туман_дней', 'days'), ('hail_d', 'Град_дней', 'days'),
+                               ('glaze_d', 'Гололёд_дней', 'days'), ('gust', 'Порыв15_дней', 'ge15'),
+                               ('gust', 'Порыв_макс', 'max')]:
+            if col not in g or 'n_terms' not in g or not _complete(g['n_terms'].values):
+                continue
+            x = g[col].values
+            if how == 'days':
+                add(st, rg, yr, code, int(np.sum(np.isfinite(x))))
+            elif how == 'days_pos':
+                add(st, rg, yr, code, int(np.sum(x > 0)))
+            elif how == 'ge15':
+                add(st, rg, yr, code, int(np.sum(x >= 15)))
+            elif np.isfinite(x).any():
+                add(st, rg, yr, code, np.nanmax(x))
         if 'fr' in g:
             seas = g['month'].between(4, 10).values
             frv = g['fr'].values[seas]

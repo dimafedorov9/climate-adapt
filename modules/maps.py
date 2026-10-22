@@ -139,7 +139,10 @@ def draw_water(ax, water, clip=None, river_lw=(1.6, 0.6)):
         draw_lines(ax, g, color=WATER, lw=lw, zorder=4)
 
 
-def draw_cities(ax, cities, bbox, max_rank=8, fontsize=7):
+def draw_cities(ax, cities, bbox, max_rank=8, fontsize=7, st=None):
+    near = []
+    if st is not None and len(st):
+        near = list(zip(st['lon'].values, st['lat'].values, st['name'].astype(str).str.lower().values))
     for c in cities:
         x, y = c['geometry'].x, c['geometry'].y
         if not (bbox[0] <= x <= bbox[1] and bbox[2] <= y <= bbox[3]):
@@ -148,6 +151,10 @@ def draw_cities(ax, cities, bbox, max_rank=8, fontsize=7):
         if rank is not None and rank > max_rank:
             continue
         big = rank is not None and rank <= 4
+        # город с одноимённой метеостанцией рядом не подписывается дважды
+        cn = str(c['name']).lower()[:5]
+        if not big and any(abs(x - sx) < 0.2 and abs(y - sy) < 0.2 and sn[:5] == cn for sx, sy, sn in near):
+            continue
         ax.plot(x, y, marker='s', ms=4 if big else 2.5, color='#333', zorder=9)
         ax.text(x + 0.05, y + 0.04, c['name'], fontsize=fontsize + (1 if big else 0), color='#222',
                 fontweight='bold' if big else 'normal', path_effects=HALO, zorder=9)
@@ -367,7 +374,7 @@ def map_physical(bbox, region_geom=None, dem=None, dem_extent=None, water=None, 
     if region_geom is not None:
         draw_poly(ax, region_geom, ec='#B03A2E', lw=1.4, zorder=6)
     if cities:
-        draw_cities(ax, cities, bbox)
+        draw_cities(ax, cities, bbox, st=st)
     if st is not None:
         draw_stations(ax, st, color=st_color or '#222', size=26, labels=st_labels, marker='^', edge='white')
     handles = []

@@ -29,13 +29,13 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import params as P
 from config import cf
-from modules import (readers, verify, qc, fill, derived, indices, trends, clustering, viz,
+from modules import (xlsx_daily, readers, verify, qc, fill, derived, indices, trends, clustering, viz,
                      charts, maps, basemap, interp, mapping, export)
 
 st.set_page_config(page_title='Климатические риски: подготовка данных и районирование', layout='wide')
 
 S = st.session_state
-DEFAULTS = dict(raw=None, stations=None, checks=None, comp=None, gaps=None, qc_log=None, clean=None,
+DEFAULTS = dict(x_map=None, x_files=None, raw=None, stations=None, checks=None, comp=None, gaps=None, qc_log=None, clean=None,
                 flags=None, filled=None, fill_log=None, cv=None, D=None, ann=None, events=None,
                 zoning=None, districts=None, water=None, dem=None, figs={}, tables={})
 for k, v in DEFAULTS.items():
@@ -168,6 +168,76 @@ with tabs[0]:
                            f'станций: {len(S.stations)}.')
         except Exception as e:
             st.exception(e)
+
+    with st.expander('Таблицы Excel/CSV со сложными заголовками (например, «Омск_1971.xlsx»)',
+                     expanded=False):
+        st.markdown('Суточные таблицы по одной станции за год с многострочной шапкой. Заголовки '
+                    'сопоставляются с показателями автоматически; сопоставление можно исправить. '
+                    'Значения вида «+12.3», «12,3», «<0.5», «/», «20 км», «0400 м» приводятся к числам. '
+                    'Можно загрузить сами файлы или архив ZIP/RAR.')
+        xups = st.file_uploader('Файлы или архивы', type=['xlsx', 'xls', 'csv', 'zip', 'rar', '7z'],
+                                accept_multiple_files=True, key='xups')
+        c1, c2 = st.columns(2)
+        x_region = c1.selectbox('Регион станций', list(P.CRITERIA), key='x_region')
+        x_mode = c2.radio('Объединение с файлами TT/TX/RR', ['main', 'tables', 'only'], key='x_mode',
+                          format_func={'main': 'Дополнить: приоритет у файлов TT/TX/RR',
+                                       'tables': 'Дополнить: приоритет у таблиц',
+                                       'only': 'Использовать только таблицы'}.get)
+        if xups and st.button('Распознать заголовки'):
+            try:
+                files = xlsx_daily.collect_files([(u.name, u.getvalue()) for u in xups])
+                S.x_files = files
+                grid, merged = xlsx_daily._read_grid(files[0][1], files[0][0])
+                names, _, _ = xlsx_daily.detect_header(grid, merged)
+                S.x_map = xlsx_daily.match_columns(names)
+                st.success(f'Файлов: {len(files)}. Сопоставление построено по «{files[0][0]}».')
+            except Exception as e:
+                st.error(str(e))
+        if S.get('x_map') is not None:
+            opts = ['—'] + [r[2] for r in xlsx_daily.RULES]
+            mp = st.data_editor(S.x_map, hide_index=True, use_container_width=True, key='x_map_ed',
+                                column_config={'Показатель': st.column_config.SelectboxColumn(options=opts),
+                                               'Столбец': st.column_config.NumberColumn(disabled=True),
+                                               'Заголовок': st.column_config.TextColumn(disabled=True)})
+            if st.button('Прочитать таблицы', type='primary'):
+                mp = mp.assign(Описание=mp['Показатель'].map(xlsx_daily.STD_LABEL).fillna('не используется'))
+                S.x_map = mp
+                bar = st.progress(0.0)
+                daily, _, xnotes = xlsx_daily.load_tables(S.x_files, mp,
+                                                          progress=lambda f, n: bar.progress(f, text=n))
+                bar.empty()
+                if daily.empty:
+                    st.error('Данные не прочитаны: ' + '; '.join(xnotes[:5]))
+                else:
+                    extra = xlsx_daily.to_program_vars(daily, x_region)
+                    if S.raw and x_mode != 'only':
+                        data = xlsx_daily.merge_datasets(S.raw['data'], extra,
+                                                         prefer='main' if x_mode == 'main' else 'tables')
+                        files_reg, idx = S.raw['files'], S.raw['index_files']
+                    else:
+                        data, files_reg, idx = extra, pd.DataFrame(), []
+                    reg = pd.DataFrame([dict(Файл=n, Переменная='таблица', Регион=x_region) for n, _ in S.x_files])
+                    S.raw = dict(data=data, files=pd.concat([files_reg, reg], ignore_index=True),
+                                 notes=(S.raw['notes'] if S.raw and x_mode != 'only' else []) + xnotes,
+                                 index_files=idx)
+                    old = S.stations
+                    stt = readers.build_station_table(idx, data, old)
+                    nm = daily.groupby('st')['name'].first() if 'name' in daily else pd.Series(dtype=str)
+                    stt['name'] = np.where(stt['name'].astype(str) == stt['st'].astype(str),
+                                           stt['st'].map(nm).fillna(stt['name']), stt['name'])
+                    S.stations = stt
+                    refresh_names()
+                    for k in ['checks', 'qc_log', 'clean', 'flags', 'filled', 'fill_log', 'cv', 'D', 'ann',
+                              'events', 'zoning']:
+                        S[k] = None
+                    summ = pd.DataFrame([dict(Показатель=xlsx_daily.STD_LABEL.get(c, c), Значений=int(daily[c].notna().sum()),
+                                              Мин=daily[c].min(), Макс=daily[c].max())
+                                         for c in daily.columns if c not in ('st', 'name', 'date')])
+                    st.success(f'Прочитано суток: {len(daily)}; станций: {daily["st"].nunique()}; '
+                               f'период {daily["date"].min():%d.%m.%Y}–{daily["date"].max():%d.%m.%Y}.')
+                    show_df(summ, 1)
+                    for n in xnotes:
+                        st.caption(n)
     if S.raw:
         res = S.raw
         st.subheader('Реестр файлов')

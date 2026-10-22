@@ -170,8 +170,11 @@ def spatial_check(var, comp, M, stations, log, nbrs=None, z_s=P.SPATIAL_Z_SUSPEC
     z = robust_z(A - pred).where(nused >= 2)
     A2 = A.mask(z.abs() > z_r * fac)
     pred, nused = neighbor_prediction(A2, nbrs)
-    z = robust_z(A - pred).where(nused >= 2)
-    rej = (z.abs() > z_r * fac) & allow_reject
+    resid = A - pred
+    z = robust_z(resid).where(nused >= 2)
+    # брак — только при большом z и большом абсолютном расхождении с оценкой по соседям
+    big = resid.abs() > np.where(strict, P.SPATIAL_MIN_ABS * P.STRICT_FACTOR, P.SPATIAL_MIN_ABS)
+    rej = (z.abs() > z_r * fac) & big & allow_reject
     sus = (z.abs() > z_s * fac) & ~rej
     log.add_mask(var, comp, M, rej, REJECT, 'S', note='|z| по соседям > ' + str(z_r))
     log.add_mask(var, comp, M, sus, SUSPECT, 'S', note='|z| по соседям > ' + str(z_s))
@@ -205,10 +208,15 @@ def qc_tx(df, stations, log, opts):
             check_persistence('TX', c, Mc, log)
     tmin, tmax, tmean = M['tmin'], M['tmax'], M['tmean']
     # Tмин > Tмакс: бракуется компонент с большим |z|; при неопределённости — оба
-    inv = tmin > tmax + P.TEMP_ORDER_TOL
+    # Tмин и Tмакс в TX определены по полусуткам, поэтому небольшое превышение Tмин над Tмакс
+    # возможно при резкой смене погоды — это «сомнительно»; превышение > 5 °C — брак
+    diff = tmin - tmax
+    inv = diff > P.TEMP_ORDER_TOL
+    gross = diff > P.TX_ORDER_REJECT
     zmin, zmax = z['tmin'].abs().fillna(0), z['tmax'].abs().fillna(0)
-    log.add_mask('TX', 'tmin', tmin, inv & (zmin >= zmax), REJECT, 'TX1')
-    log.add_mask('TX', 'tmax', tmax, inv & (zmax > zmin), REJECT, 'TX1')
+    log.add_mask('TX', 'tmin', tmin, gross & (zmin >= zmax), REJECT, 'TX1')
+    log.add_mask('TX', 'tmax', tmax, gross & (zmax > zmin), REJECT, 'TX1')
+    log.add_mask('TX', 'tmin', tmin, inv & ~gross, SUSPECT, 'TX1', note='возможно из-за полусуточных экстремумов')
     # Tмакс − Tср > 15
     big = (tmax - tmean) > P.TMAX_MINUS_TMEAN_MAX
     log.add_mask('TX', 'tmax', tmax, big, REJECT, 'TX2', note='Tмакс − Tср > 15 °C')

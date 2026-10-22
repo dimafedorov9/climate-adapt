@@ -153,13 +153,27 @@ def m_ratio(M, nbrs, **kw):
 
 
 def m_knn(M, A, clim, k=5, **kw):
+    """
+    KNN по матрице аномалий «сутки × станции». Сутки-доноры подбираются
+    внутри того же календарного года (быстро и с учётом сезона); строки, где
+    данных нет ни на одной станции, не обрабатываются.
+    """
     from sklearn.impute import KNNImputer
     X = A.values
-    keep = ~np.all(np.isnan(X), axis=1)
     Xf = X.copy()
-    if keep.sum() > k:
+    years = A.index.year.values
+    for y in np.unique(years):
+        r = np.where(years == y)[0]
+        sub = X[r]
+        rows_ok = ~np.all(np.isnan(sub), axis=1)
+        cols_ok = ~np.all(np.isnan(sub[rows_ok]), axis=0) if rows_ok.any() else np.zeros(sub.shape[1], bool)
+        if rows_ok.sum() <= k or cols_ok.sum() < 2 or not np.isnan(sub[np.ix_(rows_ok, cols_ok)]).any():
+            continue
         imp = KNNImputer(n_neighbors=k, weights='distance')
-        Xf[keep] = imp.fit_transform(X[keep]) if np.isnan(X[keep]).any() else X[keep]
+        part = imp.fit_transform(sub[np.ix_(rows_ok, cols_ok)])
+        blk = Xf[r]
+        blk[np.ix_(rows_ok, cols_ok)] = part
+        Xf[r] = blk
     est = pd.DataFrame(Xf, index=A.index, columns=A.columns) + clim
     return M.fillna(est)
 

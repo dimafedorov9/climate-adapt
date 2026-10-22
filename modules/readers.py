@@ -45,6 +45,7 @@ VAR_INFO = {
     'RS': dict(name='Температура точки росы по срокам', unit='°C'),
     'RH': dict(name='Относительная влажность по срокам', unit='%'),
     'FR': dict(name='Класс пожарной опасности (Нестеров)', unit='класс'),
+    'DY': dict(name='Прочие суточные характеристики из таблиц (влажность, снег, явления, порыв)', unit=''),
 }
 
 REGION_SUFFIX = {'nsk': 'НСО', 'omsk': 'Омская обл.'}
@@ -426,8 +427,16 @@ def parse_index_file(path):
         if len(dec) >= 2 and 40 <= dec[0] <= 75:
             lat, lon = dec[0], dec[1]
         alt = next((v for v in ints if -50 <= v <= 5000), np.nan)
-        rows.append(dict(st=st, name=' '.join(name) or str(st), lat=lat, lon=lon, alt=alt))
+        nm = ' '.join(name).strip('.').replace('_', ' ')
+        if nm.isupper():                       # «УСТЬ-ТАРКА» → «Усть-Тарка», «УЧЕБНАЯ ГМС» → «Учебная ГМС»
+            nm = ' '.join(w if w in ('ГМС', 'ГМО', 'АМСГ', 'ОГМС', 'ГМБ') else
+                          '-'.join(p.capitalize() for p in w.split('-')) for w in nm.split())
+            nm = nm.replace('О.дальний', 'о. Дальний')
+        rows.append(dict(st=st, name=nm or str(st), lat=lat, lon=lon, alt=alt))
     df = pd.DataFrame(rows).drop_duplicates('st')
+    # целое число в конце строки index_* — код региона (одинаковый у всех станций), а не высота
+    if len(df) > 3 and df['alt'].nunique(dropna=True) <= 1:
+        df['alt'] = np.nan
     return df
 
 

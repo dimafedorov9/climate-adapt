@@ -24,6 +24,10 @@ MONTHS_FR = (4, 5, 6, 7, 8, 9, 10)
 def _row_complete(df, var):
     comps = [c for c in df.columns if c not in ('st', 'date', 'region') and not c.endswith('_tr')
              and c != 'fr_notcalc']
+    if var == 'DY':
+        key = next((c for c in ('n_terms', 'rh_mean', 'p_mean') if c in df.columns), None)
+        if key:
+            return df[key].notna()
     if MAIN_COMP.get(var):
         return df[MAIN_COMP[var]].notna()
     return df[comps].notna().mean(axis=1) >= 0.75
@@ -184,7 +188,9 @@ def consistency_checks(data, stations=None):
         no_xy = stations[stations[['lat', 'lon']].isna().any(axis=1)]
         out.append(_check('Станций без координат', len(no_xy), 'внимание' if len(no_xy) else 'норма',
                           ', '.join(no_xy['name'].astype(str).head(15))))
-        miss_vars = stations[stations['vars'].str.count(',') + 1 < len(data)]
+        main_vars = [v for v in data if v != 'DY']
+        miss_vars = stations[stations['vars'].apply(lambda x: len([v for v in str(x).split(', ') if v in main_vars]))
+                             < len(main_vars)]
         if len(miss_vars):
             out.append(_check('Станций, представленных не во всех переменных', len(miss_vars), 'внимание',
                               '; '.join(f"{r['name']}: {r['vars']}" for _, r in miss_vars.head(8).iterrows())))

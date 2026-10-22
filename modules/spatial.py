@@ -27,7 +27,12 @@ def distance_matrix(stations):
 
 def to_matrix(df, comp):
     """Длинная таблица [st, date, comp] → матрица date × st."""
-    return df.pivot_table(index='date', columns='st', values=comp, aggfunc='first').sort_index()
+    M = df.pivot_table(index='date', columns='st', values=comp, aggfunc='first')
+    # общая сетка для всех компонентов: полный ряд дат и все станции файла,
+    # иначе матрицы Tмин/Tмакс и т. п. различаются строками и не сравниваются
+    full = pd.date_range(df['date'].min(), df['date'].max())
+    sts = sorted(df['st'].unique())
+    return M.reindex(index=full, columns=sts)
 
 
 def seasonal_anomalies(M, window=15):
@@ -109,12 +114,20 @@ def neighbor_prediction(A, nbrs):
     return pred, nused
 
 
-def robust_z(resid):
-    """z-оценка по медиане и MAD для каждого столбца (станции)."""
-    med = resid.median()
-    mad = (resid - med).abs().median() * 1.4826
-    mad = mad.replace(0, np.nan)
-    return (resid - med) / mad
+def robust_z(resid, by_month=True):
+    """
+    z-оценка по медиане и MAD для каждой станции. При by_month=True масштаб
+    оценивается отдельно по каждому месяцу: зимой расхождения между
+    станциями (инверсии) заметно больше, чем летом.
+    """
+    if not by_month:
+        med = resid.median()
+        mad = ((resid - med).abs().median() * 1.4826).replace(0, np.nan)
+        return (resid - med) / mad
+    g = resid.groupby(resid.index.month)
+    med = g.transform('median')
+    mad = (resid - med).abs().groupby(resid.index.month).transform('median') * 1.4826
+    return (resid - med) / mad.replace(0, np.nan)
 
 
 def in_periods(dates, periods):
