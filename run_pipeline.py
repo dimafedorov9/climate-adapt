@@ -31,7 +31,7 @@ from modules import (readers, verify, qc, fill, derived, indices, trends, cluste
 # ─── Параметры запуска (можно менять здесь) ──────────────────────────────
 ZONING_FEATURES = ['SU30', 'АЖ_случаев', 'Сумма10', 'ГТК', 'PRCPTOT', 'CDD', 'R10mm', 'Ветер15', 'FD']
 MAP_INDICES = ['SU30', 'Сумма10', 'ГТК', 'CDD', 'PRCPTOT']
-REGION_NAMES = {'НСО': 'Новосибирская область', 'Омская обл.': 'Омская область'}
+REGION_NAMES = P.REGION_NE     # регион в данных → субъект на карте (для других регионов дополните)
 TREND_CODES = ['Tср_год', 'TXx', 'SU30', 'АЖ_случаев', 'PRCPTOT', 'CDD', 'RX1day', 'Сумма10', 'ГТК', 'Ветер15']
 
 
@@ -107,9 +107,9 @@ def main(src, out, stations_file=None, fill_data=True, dem=False):
     he = indices.heat_events(D)
     save_tab(he, out, 'table_10_периоды_жары', 1)
     yrs = (int(ann['year'].min()), int(ann['year'].max()))
-    hs = {f'{rg}, {yrs[0]}–{yrs[1]} гг.': {k: v for k, v in indices.heat_summary(he, D, yrs, rg).items() if k != 'Период'}
-          for rg in sorted(D['region'].dropna().unique())}
-    save_tab(pd.DataFrame(hs).rename_axis('Характеристика').reset_index(), out, 'table_11_жара_сводка')
+    for rg in sorted(D['region'].dropna().unique()):
+        hs = {f'{yrs[0]}–{yrs[1]} гг.': {k: v for k, v in indices.heat_summary(he, D, yrs, rg).items() if k != 'Период'}}
+        save_tab(pd.DataFrame(hs).rename_axis('Характеристика').reset_index(), out, f'table_11_жара_{rg}')
     for season, kind in [('тёплый', 'dry'), ('холодный', 'dry'), ('холодный', 'nosnow')]:
         spl, ok = indices.dry_spells(D, season, kind=kind)
         _, reg = indices.spell_class_table(spl, ok)
@@ -135,7 +135,11 @@ def main(src, out, stations_file=None, fill_data=True, dem=False):
     if len(xy) < 4:
         print('   Нет координат станций — районирование и карты пропущены.')
         return
-    for rg, rname in REGION_NAMES.items():
+    for rg in sorted(xy['region'].dropna().unique()):
+        rname = REGION_NAMES.get(rg)
+        if rname is None:
+            print(f'   {rg}: нет соответствия субъекту на карте (params.REGION_NE) — карты пропущены')
+            continue
         base = xy[xy['region'] == rg][['st', 'name', 'region', 'lat', 'lon', 'alt']].merge(
             indices.station_means(ann).drop(columns='region'), on='st')
         feats = [f for f in ZONING_FEATURES if f in base.columns and base[f].notna().sum() >= 4 and base[f].std() > 0]

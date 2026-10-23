@@ -71,7 +71,7 @@ def neighbors(stations, A=None, n=5, max_km=150.0, same_region=False, min_r=None
         for o in ids:
             if o == st:
                 continue
-            if same_region and s.loc[o, 'region'] != s.loc[st, 'region']:
+            if same_region and 'region' in s and s.loc[o, 'region'] != s.loc[st, 'region']:
                 continue
             km = D.loc[st, o] if D is not None and has_xy.get(st, False) and has_xy.get(o, False) else np.nan
             r = C.loc[st, o] if C is not None else np.nan

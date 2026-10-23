@@ -218,7 +218,7 @@ def _apply_method(method, M, ctx):
 def _context(M, stations, comp):
     A, clim = seasonal_anomalies(M)
     nbrs = neighbors(stations[stations['st'].isin(M.columns)], A, n=P.NEIGHBOR_N,
-                     max_km=P.NEIGHBOR_MAX_KM * 1.5)
+                     max_km=P.NEIGHBOR_MAX_KM * 1.5, same_region=P.NEIGHBOR_SAME_REGION)
     return dict(A=A, clim=clim, nbrs=nbrs, stations=stations)
 
 
@@ -328,19 +328,32 @@ def fill_dataset(data, stations, methods=None, comps=None, progress=None):
     logs, cvs = [], []
     todo = [(v, c) for v, cs in FILL_COMPS.items() if v in data and methods.get(v) != 'none'
             for c in (comps or {}).get(v, cs) if c in data[v].columns]
+    # каждый регион обрабатывается отдельно: свои соседи, своя проверка методов
     for k, (var, comp) in enumerate(todo):
         if progress:
             progress(k / max(1, len(todo)), f'{var}: {comp}')
-        Mf, log, cv, used = fill_component(data[var], comp, stations, methods.get(var, 'auto'))
-        if cv is not None:
-            cv = cv.copy()
-            cv.insert(0, 'Переменная', var)
-            cv['Выбран'] = cv['Метод'] == used
-            cvs.append(cv)
-        log.insert(0, 'var', var)
-        logs.append(log)
-        long = Mf.stack(future_stack=True).rename(comp).reset_index() if _FUT else Mf.stack(dropna=False).rename(comp).reset_index()
-        long.columns = ['date', 'st', comp]
+        longs = []
+        for rg, dfr in data[var].groupby('region', dropna=False):
+            str_ = stations[stations['st'].isin(dfr['st'].unique())]
+            if dfr[comp].notna().sum() == 0:
+                continue
+            Mf, log, cv, used = fill_component(dfr, comp, str_, methods.get(var, 'auto'))
+            if cv is not None and not cv.empty:
+                cv = cv.copy()
+                cv.insert(0, 'Переменная', var)
+                cv.insert(0, 'Регион', rg)
+                cv['Выбран'] = cv['Метод'] == used
+                cvs.append(cv)
+            log.insert(0, 'var', var)
+            log['region'] = rg
+            logs.append(log)
+            long = Mf.stack(future_stack=True).rename(comp).reset_index() if _FUT else \
+                Mf.stack(dropna=False).rename(comp).reset_index()
+            long.columns = ['date', 'st', comp]
+            longs.append(long)
+        if not longs:
+            continue
+        long = pd.concat(longs, ignore_index=True)
         base = filled[var].drop(columns=[comp])
         region = filled[var].groupby('st')['region'].first()
         base = base.merge(long, on=['st', 'date'], how='outer')
@@ -365,6 +378,7 @@ def fill_summary(fill_log, data):
     """Сводка: сколько значений восстановлено по переменным, компонентам и методам."""
     if fill_log is None or fill_log.empty:
         return pd.DataFrame()
-    t = fill_log.groupby(['var', 'comp', 'method']).size().rename('Восстановлено').reset_index()
+    keys = (['region'] if 'region' in fill_log else []) + ['var', 'comp', 'method']
+    t = fill_log.groupby(keys).size().rename('Восстановлено').reset_index()
     t['Метод (описание)'] = t['method'].map(METHODS)
-    return t.rename(columns={'var': 'Переменная', 'comp': 'Компонент', 'method': 'Метод'})
+    return t.rename(columns={'region': 'Регион', 'var': 'Переменная', 'comp': 'Компонент', 'method': 'Метод'})

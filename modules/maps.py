@@ -191,11 +191,25 @@ def _colorbar(fig, ax, cm, norm, label, decimals=1, orientation='vertical'):
     return cb
 
 
-def _cluster_legend(ax, clusters, colors, title='Район', loc='lower right', extra=None):
+def legend_top(ax, handles, ncol=None):
+    """Легенда над полем карты (между заголовком и рамкой) — не перекрывает объекты карты."""
+    if not handles:
+        return 0
+    ncol = ncol or min(len(handles), 4)
+    ax.legend(handles=handles, fontsize=9, loc='lower center', bbox_to_anchor=(0.5, 1.005), ncol=ncol,
+              frameon=False, handlelength=1.6, columnspacing=1.4, borderaxespad=0.2)
+    return int(np.ceil(len(handles) / ncol))
+
+
+def set_title(ax, title, legend_rows=0):
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=10 + 17 * legend_rows)
+
+
+def _cluster_legend(ax, clusters, colors, title='Район', loc=None, extra=None):
     h = [Patch(fc=colors[c], ec='#333', lw=0.5, label=f'{title} {c}') for c in clusters]
     if extra:
         h += extra
-    ax.legend(handles=h, fontsize=9, loc=loc, frameon=True, framealpha=0.92, edgecolor='#999')
+    return legend_top(ax, h)
 
 
 def thiessen(st, clip_geom):
@@ -261,13 +275,14 @@ def map_schematic(st, region_geom, bbox, cluster_col=None, value_col=None, value
         ([colors[c] for c in st[cluster_col]] if cluster_col else [cm(norm(v)) for v in st[value_col]])
     draw_stations(ax, st, color=pt_color, size=30 if mode != 'points' else 70, labels=labels,
                   edge='white' if mode != 'points' else '#222')
+    rows = 0
     if cluster_col:
-        _cluster_legend(ax, sorted(colors), colors)
+        rows = _cluster_legend(ax, sorted(colors), colors)
     elif value_col:
         _colorbar(fig, ax, cm, norm, value_label, decimals)
     north_arrow(ax)
     scale_bar(ax, bbox)
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
+    set_title(ax, title, rows)
     fig.tight_layout()
     return fig
 
@@ -310,12 +325,13 @@ def map_districts(polys, st, bbox, key='cluster', value_label='', title='', cmap
     if key == 'cluster':
         extra = [Line2D([0], [0], marker='o', color='w', markerfacecolor='#222', markersize=6,
                         label='Метеостанция')] if show_stations else None
-        _cluster_legend(ax, cl, colors, extra=extra)
+        rows = _cluster_legend(ax, cl, colors, extra=extra)
     else:
+        rows = 0
         _colorbar(fig, ax, cm, norm, value_label, decimals)
     north_arrow(ax)
     scale_bar(ax, bbox)
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
+    set_title(ax, title, rows)
     fig.tight_layout()
     return fig
 
@@ -388,8 +404,7 @@ def map_physical(bbox, region_geom=None, dem=None, dem_extent=None, water=None, 
         handles.append(Line2D([0], [0], color='#B03A2E', lw=1.4, label='Граница субъекта'))
     if clusters:
         handles += [Patch(fc=colors[c], ec='#333', lw=0.4, alpha=0.8, label=f'Район {c}') for c in cl]
-    if handles:
-        ax.legend(handles=handles, fontsize=8, loc='lower right', framealpha=0.92, edgecolor='#999')
+    rows = legend_top(ax, handles)
     if field is not None:
         _colorbar(fig, ax, cm, norm, value_label, decimals)
     elif dem is not None and relief_legend:
@@ -397,7 +412,7 @@ def map_physical(bbox, region_geom=None, dem=None, dem_extent=None, water=None, 
         _colorbar(fig, ax, HYPSO, Normalize(lo, max(hi, lo + 50)), 'Высота, м', 0)
     north_arrow(ax)
     scale_bar(ax, bbox)
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
+    set_title(ax, title, rows)
     fig.tight_layout()
     return fig
 
@@ -417,8 +432,9 @@ def map_tiles(bbox, img, img_extent, attribution='', region_geom=None, polys=Non
             for p in polys:
                 if p.get('cluster') is not None:
                     draw_poly(ax, p['geometry'], fc=colors[p['cluster']], ec='white', lw=0.6, alpha=alpha, zorder=2)
-            _cluster_legend(ax, cl, colors)
+            rows = _cluster_legend(ax, cl, colors)
         else:
+            rows = 0
             cm, norm, _ = _value_norm([p.get('value', np.nan) for p in polys], cmap, 8)
             for p in polys:
                 v = p.get('value', np.nan)
@@ -435,42 +451,113 @@ def map_tiles(bbox, img, img_extent, attribution='', region_geom=None, polys=Non
             color='#333', path_effects=HALO, zorder=20)
     north_arrow(ax)
     scale_bar(ax, bbox)
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
+    set_title(ax, title, rows if polys else 0)
     fig.tight_layout()
     return fig
 
 
 # ─── 5. Интерактивная ────────────────────────────────────────────────────
-def folium_map(st, polys=None, key='cluster', region_geom=None, tiles='OpenTopoMap', value_col=None):
+def folium_map(st, polys=None, key='cluster', region_geom=None, value_col=None, value_label='',
+               cluster_col=None, field=None, grid=None, decimals=1, caption=''):
+    """
+    Интерактивная карта: подложки (топографическая, физическая, OSM), граница
+    территории, районы (по кластеру или значению), поле показателя
+    (полупрозрачный растр), станции, окрашенные по кластеру или значению,
+    с всплывающими подписями; легенда и пояснение «что показано».
+    """
+    import io
+    import base64
     import folium
+    import branca.colormap as bcm
     from shapely.geometry import mapping
     center = [float(st['lat'].mean()), float(st['lon'].mean())]
     m = folium.Map(location=center, zoom_start=6, tiles=None, control_scale=True)
-    folium.TileLayer('OpenTopoMap', name='Топографическая (OpenTopoMap)', attr='© OpenTopoMap, © OSM').add_to(m)
-    folium.TileLayer('OpenStreetMap', name='OpenStreetMap').add_to(m)
     folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}',
                      name='Физическая (Esri)', attr='Esri').add_to(m)
-    if polys:
-        cl = sorted({p['cluster'] for p in polys if p.get('cluster') is not None}) if key == 'cluster' else []
+    folium.TileLayer('OpenTopoMap', name='Топографическая (OpenTopoMap)', attr='© OpenTopoMap, © OSM').add_to(m)
+    folium.TileLayer('OpenStreetMap', name='OpenStreetMap').add_to(m)
+    colors, cmap_v = {}, None
+    vals_all = []
+    if cluster_col and cluster_col in st:
+        cl = sorted(st[cluster_col].dropna().unique())
         colors = {c: CLUSTER_COLORS[i % len(CLUSTER_COLORS)] for i, c in enumerate(cl)}
-        fg = folium.FeatureGroup(name='Районы')
+    if value_col and value_col in st:
+        vals_all = list(st[value_col].dropna().values)
+        if field is not None:
+            vals_all += list(np.asarray(field)[np.isfinite(field)].ravel())
+        lo, hi = float(np.nanmin(vals_all)), float(np.nanmax(vals_all))
+        if hi == lo:
+            hi = lo + 1
+        vir = plt.get_cmap('viridis')
+        cmap_v = bcm.LinearColormap([matplotlib_hex(vir(x)) for x in np.linspace(0, 1, 9)], vmin=lo, vmax=hi,
+                                    caption=value_label)
+    # поле показателя
+    if field is not None and cmap_v is not None:
+        LON, LAT = grid
+        F = np.asarray(field, float)
+        norm = (F - cmap_v.vmin) / (cmap_v.vmax - cmap_v.vmin)
+        rgba = plt.get_cmap('viridis')(np.clip(norm, 0, 1))
+        rgba[..., 3] = np.where(np.isfinite(F), 0.65, 0)
+        rgba = rgba[::-1] if LAT[0, 0] < LAT[-1, 0] else rgba
+        buf = io.BytesIO()
+        plt.imsave(buf, rgba, format='png')
+        url = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+        folium.raster_layers.ImageOverlay(url, bounds=[[float(LAT.min()), float(LON.min())],
+                                                       [float(LAT.max()), float(LON.max())]],
+                                          name=f'Поле: {value_label}', opacity=1.0, interactive=False).add_to(m)
+    # районы
+    if polys:
+        fg = folium.FeatureGroup(name='Административные районы')
+        if key == 'cluster':
+            pcl = sorted({p['cluster'] for p in polys if p.get('cluster') is not None})
+            for c in pcl:
+                colors.setdefault(c, CLUSTER_COLORS[len(colors) % len(CLUSTER_COLORS)])
         for p in polys:
             v = p.get(key)
-            col = colors.get(v, '#999') if key == 'cluster' else '#2E86AB'
-            tip = f"{p['name']}: {'район ' + str(v) if key == 'cluster' else cf(v, 2)}"
+            if key == 'cluster':
+                col = colors.get(v, '#999')
+                tip = f"{p['name']}: район {v}"
+            else:
+                ok = v is not None and np.isfinite(v)
+                col = cmap_v(v) if (cmap_v is not None and ok) else '#bbb'
+                tip = f"{p['name']}: {cf(v, decimals) if ok else 'нет данных'}"
             folium.GeoJson(mapping(p['geometry']), style_function=lambda f, c=col: dict(
-                fillColor=c, color='#333', weight=0.6, fillOpacity=0.45), tooltip=tip).add_to(fg)
+                fillColor=c, color='#444', weight=0.7, fillOpacity=0.5), tooltip=tip).add_to(fg)
         fg.add_to(m)
     if region_geom is not None:
-        folium.GeoJson(mapping(region_geom), name='Граница', style_function=lambda f: dict(
-            fill=False, color='#B03A2E', weight=2)).add_to(m)
-    fs = folium.FeatureGroup(name='Станции')
+        folium.GeoJson(mapping(region_geom), name='Граница субъекта', style_function=lambda f: dict(
+            fill=False, color='#B03A2E', weight=2.2)).add_to(m)
+    fs = folium.FeatureGroup(name='Метеостанции')
     for _, r in st.iterrows():
-        txt = f"{r.get('name', r['st'])} ({r['st']})"
-        if value_col and value_col in r:
-            txt += f": {cf(r[value_col], 2)}"
-        folium.CircleMarker([r['lat'], r['lon']], radius=5, color='#222', fill=True, fill_color='#F18F01',
-                            fill_opacity=0.9, tooltip=txt).add_to(fs)
+        txt = f"<b>{r.get('name', r['st'])}</b> ({r['st']})"
+        fill = '#F18F01'
+        if cluster_col and cluster_col in r and r[cluster_col] in colors:
+            fill = colors[r[cluster_col]]
+            txt += f"<br>Район {r[cluster_col]}"
+        if value_col and value_col in r and np.isfinite(r[value_col]):
+            fill = cmap_v(r[value_col]) if not cluster_col else fill
+            txt += f"<br>{value_label}: {cf(r[value_col], decimals)}"
+        folium.CircleMarker([r['lat'], r['lon']], radius=6, color='#222', weight=1, fill=True, fill_color=fill,
+                            fill_opacity=0.95, tooltip=folium.Tooltip(txt)).add_to(fs)
     fs.add_to(m)
+    if cmap_v is not None and not cluster_col:
+        cmap_v.add_to(m)
+    if colors:
+        items = ''.join(f'<div><span style="display:inline-block;width:14px;height:14px;background:{c};'
+                        f'border:1px solid #333;margin-right:6px;vertical-align:middle"></span>Район {k}</div>'
+                        for k, c in colors.items())
+        m.get_root().html.add_child(folium.Element(
+            f'<div style="position:fixed;bottom:30px;left:12px;z-index:9999;background:white;padding:6px 10px;'
+            f'border:1px solid #999;border-radius:4px;font:13px sans-serif">{items}</div>'))
+    if caption:
+        m.get_root().html.add_child(folium.Element(
+            f'<div style="position:fixed;top:12px;left:60px;z-index:9999;background:rgba(255,255,255,.92);'
+            f'padding:6px 10px;border:1px solid #999;border-radius:4px;font:13px sans-serif;max-width:55%">'
+            f'{caption}</div>'))
     folium.LayerControl(collapsed=False).add_to(m)
     return m
+
+
+def matplotlib_hex(rgba):
+    from matplotlib.colors import to_hex
+    return to_hex(rgba)

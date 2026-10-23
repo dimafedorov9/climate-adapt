@@ -60,7 +60,7 @@ def completeness_heatmap(comp, var, names=None, figsize=(12, 8)):
 
 def qc_series(df, comp, st, log=None, clean=None, filled_log=None, title='', ylabel='', figsize=(10, 5),
               period=None):
-    """Ряд одной станции: исходные значения, забракованные и сомнительные, восстановленные."""
+    """Ряд одной станции: исходные значения, ошибочные, требующие проверки, исправленные и восстановленные."""
     d = df[df['st'] == st].set_index('date')[comp]
     if period:
         d = d[period[0]:period[1]]
@@ -76,8 +76,8 @@ def qc_series(df, comp, st, log=None, clean=None, filled_log=None, title='', yla
     if log is not None and not log.empty:
         L = log[(log['Станция'] == st) & (log['Компонент'] == comp) & log['Основное']]
         L = L[pd.to_datetime(L['Дата']).isin(d.index)]
-        for act, col, mk in [('брак', PALETTE[3], 'x'), ('сомнительно', PALETTE[1], 'o'),
-                             ('исправлено', PALETTE[4], 's')]:
+        for act, col, mk in [('ошибочное', PALETTE[3], 'x'), ('требует проверки', PALETTE[1], 'o'),
+                             ('исправленное', PALETTE[4], 's')]:
             s = L[L['Действие'] == act]
             if len(s):
                 ax.scatter(pd.to_datetime(s['Дата']), s['Значение'], color=col, marker=mk, s=40,
@@ -89,7 +89,7 @@ def qc_series(df, comp, st, log=None, clean=None, filled_log=None, title='', yla
         if len(F):
             ax.scatter(F['date'], F['value'], color=PALETTE[2], s=10, zorder=4)
             handles.append(Line2D([0], [0], color=PALETTE[2], marker='o', ls='', ms=4,
-                                  label=f'Восстановлено ({len(F)})'))
+                                  label=f'Восстановленное ({len(F)})'))
     ax.yaxis.set_major_formatter(comma_fmt(0))
     ax.set_ylabel(ylabel, fontsize=12)
     ax.legend(handles=handles, fontsize=9, loc='upper center', bbox_to_anchor=(0.5, -0.12),
@@ -203,15 +203,16 @@ def period_compare_bar(cmp, code, label, figsize=(8, 5)):
 
 
 def qc_summary_bar(summary, figsize=(8, 5)):
-    """Число забракованных / сомнительных / исправленных значений по переменным."""
+    """Число ошибочных, исправленных и требующих проверки значений по переменным."""
     t = summary.groupby(['Переменная', 'Действие'])['Значений'].sum().unstack(fill_value=0)
-    order = [c for c in ['брак', 'исправлено', 'сомнительно'] if c in t.columns]
+    order = [c for c in ['ошибочное', 'исправленное', 'требует проверки'] if c in t.columns]
     t = t[order]
     fig, ax = plt.subplots(figsize=figsize)
-    cols = {'брак': PALETTE[3], 'исправлено': PALETTE[4], 'сомнительно': PALETTE[1]}
+    cols = {'ошибочное': PALETTE[3], 'исправленное': PALETTE[4], 'требует проверки': PALETTE[1]}
     left = np.zeros(len(t))
     for c in order:
         ax.barh(t.index, t[c], left=left, color=cols[c], label=c.capitalize(), height=0.6)
+
         for i, (l, v) in enumerate(zip(left, t[c])):
             if v > t.values.sum() * 0.02:
                 ax.text(l + v / 2, i, f'{int(v)}', ha='center', va='center', color='white', fontsize=9,
