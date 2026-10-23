@@ -33,27 +33,68 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import params as P
 from config import cf
-from modules import (xlsx_daily, readers, verify, qc, fill, derived, indices, trends, clustering, viz,
+from modules import (loader, xlsx_daily, readers, verify, qc, fill, derived, indices, trends, clustering, viz,
                      charts, maps, basemap, interp, mapping, export)
 
-st.set_page_config(page_title='Климатические риски: подготовка данных и районирование', layout='wide')
+APP_TITLE = 'Оценка климатических рисков для региональных планов адаптации'
+st.set_page_config(page_title=APP_TITLE, layout='wide')
 
 S = st.session_state
-DEFAULTS = dict(x_map=None, x_files=None, raw=None, stations=None, checks=None, comp=None, gaps=None, qc_log=None, clean=None,
+DEFAULTS = dict(districts_all=None, x_map=None, x_files=None, x_uploads=None, raw=None, stations=None, checks=None, comp=None, gaps=None, qc_log=None, clean=None,
                 flags=None, filled=None, fill_log=None, cv=None, D=None, ann=None, events=None,
                 zoning=None, districts=None, water=None, dem=None, figs={}, tables={})
 for k, v in DEFAULTS.items():
     if k not in S:
         S[k] = v if not isinstance(v, dict) else dict(v)
+# критерии и сезоны хранятся в сессии пользователя (у каждого пользователя свои)
+import copy
+if 'criteria' not in S:
+    S.criteria = copy.deepcopy(P.CRITERIA)
+if 'seasons' not in S:
+    S.seasons = copy.deepcopy(P.SEASONS)
+P.CRITERIA = S.criteria
+P.SEASONS = S.seasons
+MONTHS_RU = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь',
+             'ноябрь', 'декабрь']
+ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII']
 
-VAR_LABEL = {k: f'{k} — {v["name"]}' for k, v in readers.VAR_INFO.items()}
-COMP_LABEL = {'tmin': 'Tмин', 'tmax': 'Tмакс', 'tmean': 'Tсредняя', 'rr_n': 'Осадки, ночь', 'rr_d': 'Осадки, день',
-              'rr_s': 'Осадки, сутки', 'fm_n': 'Ветер, ночь', 'fm_d': 'Ветер, день', 'fm_s': 'Ветер, сутки',
-              'ts00': 'Tпочвы 00 ВСВ', 'ts12': 'Tпочвы 12 ВСВ', 'fr': 'Класс пожарной опасности'}
+
+def season_txt(rg, key):
+    a, b = P.seasons_for(rg)[key]
+    return f'{ROMAN[a - 1]}–{ROMAN[b - 1]}'
+
+VAR_LABEL = {k: readers.var_label(k) for k in readers.VAR_INFO}
+COMP_LABEL = {'tmin': 'Минимальная температура (Tмин)', 'tmax': 'Максимальная температура (Tмакс)',
+              'tmean': 'Средняя суточная температура (Tср)', 'rr_n': 'Осадки за ночь', 'rr_d': 'Осадки за день',
+              'rr_s': 'Осадки за сутки', 'fm_n': 'Максимальный ветер за ночь', 'fm_d': 'Максимальный ветер за день',
+              'fm_s': 'Максимальный ветер за сутки', 'ts00': 'Температура поверхности почвы, 00 ВСВ',
+              'ts12': 'Температура поверхности почвы, 12 ВСВ', 'fr': 'Класс пожарной опасности'}
 for h in derived.HOURS:
-    COMP_LABEL[f'tt{h}'] = f'T, {h} ВСВ'
-    COMP_LABEL[f'td{h}'] = f'Td, {h} ВСВ'
-    COMP_LABEL[f'rh{h}'] = f'RH, {h} ВСВ'
+    COMP_LABEL[f'tt{h}'] = f'Температура воздуха (T), {h} ВСВ'
+    COMP_LABEL[f'td{h}'] = f'Температура точки росы (Td), {h} ВСВ'
+    COMP_LABEL[f'rh{h}'] = f'Относительная влажность (RH), {h} ВСВ'
+GLOSSARY = [(k, v['name'], v['unit']) for k, v in readers.VAR_INFO.items()] + [
+    ('Tмин, Tмакс, Tср', 'Минимальная, максимальная и средняя суточная температура воздуха', '°C'),
+    ('Td', 'Температура точки росы', '°C'),
+    ('ВСВ', 'Всемирное скоординированное время; сроки наблюдений 00, 03, …, 21 ВСВ', ''),
+    ('ОЯ, НЯ', 'Опасное и неблагоприятное (комплекс неблагоприятных) гидрометеорологическое явление', ''),
+    ('АЖ, СЖ', 'Аномально жаркая погода и сильная жара (критерии ОЯ)', ''),
+    ('АХ', 'Аномально холодная погода (критерий ОЯ)', ''),
+    ('ГТК', 'Гидротермический коэффициент Селянинова', ''),
+    ('ГСОП', 'Градусо-сутки отопительного периода', '°C·сут'),
+]
+
+
+def pretty_codes(df):
+    """Коды переменных и компонентов в таблицах заменяются полными названиями с обозначением."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    df = df.copy()
+    if 'Переменная' in df and df['Переменная'].isin(list(VAR_LABEL)).any():
+        df['Переменная'] = df['Переменная'].map(lambda v: VAR_LABEL.get(v, v))
+    if 'Компонент' in df and df['Компонент'].isin(list(COMP_LABEL)).any():
+        df['Компонент'] = df['Компонент'].map(lambda v: COMP_LABEL.get(v, v))
+    return df
 
 
 # ─── Вспомогательные функции интерфейса ─────────────────────────────────
@@ -86,11 +127,13 @@ def show_df(df, decimals=2, height=None):
         st.caption('Нет данных.')
         return
     kw = dict(height=height) if height else {}
-    st.dataframe(export.comma_frame(df, decimals), use_container_width=True, hide_index=True, **kw)
+    df = pretty_codes(df)
+    st.dataframe(export.comma_frame(df, decimals), width='stretch', hide_index=True, **kw)
 
 
 def save_table(name, df, decimals=2):
     """Запоминает таблицу для итогового архива и показывает кнопку скачивания."""
+    df = pretty_codes(df)
     S.tables[name] = (df, decimals)
     st.download_button(f'Скачать {name}.xlsx', export.xlsx_bytes({'Таблица': df}, decimals),
                        file_name=f'{name}.xlsx', key=f'dl_{name}')
@@ -103,7 +146,7 @@ def show_fig(fig, name, wide=False, kind_='chart'):
     w = (MAP_W if kind_ == 'map' else min(100, FIG_W * (1.6 if wide else 1))) / 100
     c = st.columns([w, 1 - w])[0] if w < 0.999 else st.container()
     with c:
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width='stretch')
         a, b = st.columns(2)
         a.download_button('PNG, 300 dpi', export.fig_bytes(fig, 'png'), file_name=f'{name}.png', key=f'png_{name}')
         b.download_button('PDF', export.fig_bytes(fig, 'pdf'), file_name=f'{name}.pdf', key=f'pdf_{name}')
@@ -186,10 +229,10 @@ def stations_xy():
 
 
 refresh_names()
-st.title('Климатические риски: подготовка данных, показатели и районирование')
+st.title(APP_TITLE)
 st.markdown(f'<div style="color:#555;margin-top:-0.6rem">{AUTHOR}</div>', unsafe_allow_html=True)
-st.caption('Суточные данные метеостанций → проверка → контроль качества → восстановление пропусков → '
-           'показатели для планов адаптации → районирование → карты')
+st.caption('Подготовка суточных данных метеостанций (проверка, контроль качества, восстановление пропусков), '
+           'расчёт показателей климатических рисков, районирование и карты')
 
 tabs = st.tabs(['1. Данные', '2. Проверка', '3. Контроль качества', '4. Пропуски', '5. Показатели',
                 '6. Тренды и периоды', '7. Районирование', '8. Карты', '9. Экспорт'])
@@ -197,127 +240,103 @@ tabs = st.tabs(['1. Данные', '2. Проверка', '3. Контроль �
 # ═══════════════════════════ 1. ДАННЫЕ ═══════════════════════════════════
 with tabs[0]:
     st.header('Загрузка суточных данных')
-    st.markdown('Файлы TT, TX, RR, FM, TS, RS, RH, FR (годовые, помесячные блоки) и справочники '
-                '`index_*`. Можно загрузить ZIP-архив (в том числе с вложенными архивами) или указать '
-                'папку на компьютере.')
-    c1, c2 = st.columns(2)
-    with c1:
-        ups = st.file_uploader('ZIP-архивы с данными', type=['zip'], accept_multiple_files=True)
-    with c2:
-        folder = st.text_input('или путь к папке с данными', value='')
-        rr_layout = st.selectbox('Раскладка значений в RR', ['auto', 'day', 'block'],
+    st.markdown('Загрузите файлы или архивы в любом сочетании — программа сама определит их тип, прочитает, '
+                'сверит и объединит:')
+    st.markdown('- файлы станционного формата: ' + '; '.join(f'{VAR_LABEL[k]}' for k in readers.VAR_INFO
+                                                            if k != 'DY') + '; справочники станций `index_*`;\n'
+                '- суточные таблицы Excel/CSV по станциям с многострочной шапкой (значения вида «+12.3», «12,3», '
+                '«<0.5», «/», «20 км» приводятся к числам);\n'
+                '- архивы ZIP, RAR, 7z, в том числе вложенные.')
+    with st.expander('Обозначения переменных и сокращения', expanded=False):
+        st.dataframe(pd.DataFrame(GLOSSARY, columns=['Обозначение', 'Расшифровка', 'Единицы']),
+                     width='stretch', hide_index=True)
+    ups = st.file_uploader('Файлы и архивы с данными', accept_multiple_files=True,
+                           type=['zip', 'rar', '7z', 'xlsx', 'xls', 'csv', 'txt', 'dat'])
+    known = list(dict.fromkeys(regions() + list(P.CRITERIA)))
+    with st.expander('Параметры чтения', expanded=False):
+        c1, c2 = st.columns(2)
+        x_reg_sel = c1.selectbox('Регион станций из таблиц, если его нельзя определить автоматически',
+                                 ['Определить автоматически'] + known + ['Другой…'], key='x_region_sel',
+                                 help='Регион таблицы определяется по индексу станции (если она есть в '
+                                      'справочниках станционных файлов) или по имени файла.')
+        x_region = (c1.text_input('Название региона', key='x_region_new') if x_reg_sel == 'Другой…'
+                    else (None if x_reg_sel == 'Определить автоматически' else x_reg_sel))
+        x_mode = c2.radio('При совпадении станции и даты в обоих источниках', ['main', 'tables'], key='x_mode',
+                          format_func={'main': 'Приоритет у файлов станционного формата',
+                                       'tables': 'Приоритет у таблиц Excel/CSV'}.get)
+        rr_layout = c2.selectbox('Раскладка значений в файлах осадков (RR)', ['auto', 'day', 'block'],
                                  format_func={'auto': 'Определить автоматически',
                                               'day': 'Ночь, день, сутки по датам',
-                                              'block': 'Блоками по месяцу (первая версия файлов)'}.get)
-        demo = st.checkbox('Тестовые данные (синтетические, для проверки работы программы)')
-    if st.button('Прочитать данные', type='primary'):
-        tmp = None
-        try:
-            if demo:
-                tmp = tempfile.mkdtemp(prefix='ca_demo_')
-                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tests'))
-                import make_test_data
-                make_test_data.main(tmp, 2014, 2017)
-                src = tmp
-            elif ups:
-                tmp = tempfile.mkdtemp(prefix='ca_up_')
-                for u in ups:
-                    readers.extract_archive(u.getvalue(), os.path.join(tmp, os.path.splitext(u.name)[0]))
-                src = tmp
-            elif folder and os.path.isdir(folder):
-                src = folder
-            else:
-                st.error('Загрузите архив или укажите существующую папку.')
-                src = None
-            if src:
-                bar = st.progress(0.0, text='Чтение файлов…')
-                res = readers.load_dataset(src, rr_layout, progress=lambda f, n: bar.progress(f, text=f'Чтение: {n}'))
-                bar.empty()
-                S.raw = res
-                S.stations = numeric_stations(readers.build_station_table(res['index_files'], res['data']))
-                refresh_names()
-                for k in ['checks', 'qc_log', 'clean', 'flags', 'filled', 'fill_log', 'cv', 'D', 'ann',
-                          'events', 'zoning']:
-                    S[k] = None
-                st.success(f'Прочитано файлов: {len(res["files"])}; переменных: {len(res["data"])}; '
-                           f'станций: {len(S.stations)}.')
-        except Exception as e:
-            st.exception(e)
+                                              'block': 'Блоками по месяцу'}.get)
 
-    with st.expander('Таблицы Excel/CSV со сложными заголовками (например, «Омск_1971.xlsx»)',
-                     expanded=False):
-        st.markdown('Суточные таблицы по одной станции за год с многострочной шапкой. Заголовки '
-                    'сопоставляются с показателями автоматически; сопоставление можно исправить. '
-                    'Значения вида «+12.3», «12,3», «<0.5», «/», «20 км», «0400 м» приводятся к числам. '
-                    'Можно загрузить сами файлы или архив ZIP/RAR.')
-        xups = st.file_uploader('Файлы или архивы', type=['xlsx', 'xls', 'csv', 'zip', 'rar', '7z'],
-                                accept_multiple_files=True, key='xups')
-        c1, c2 = st.columns(2)
-        known = list(dict.fromkeys(regions() + list(P.CRITERIA)))
-        x_reg_sel = c1.selectbox('Регион станций', known + ['Другой…'], key='x_region_sel')
-        x_region = c1.text_input('Название региона', key='x_region_new') if x_reg_sel == 'Другой…' else x_reg_sel
-        x_region = x_region or 'Регион'
-        x_mode = c2.radio('Объединение с файлами TT/TX/RR', ['main', 'tables', 'only'], key='x_mode',
-                          format_func={'main': 'Дополнить: приоритет у файлов TT/TX/RR',
-                                       'tables': 'Дополнить: приоритет у таблиц',
-                                       'only': 'Использовать только таблицы'}.get)
-        if xups and st.button('Распознать заголовки'):
+    def _read(mapping=None, uploads=None):
+        bar = st.progress(0.0, text='Чтение файлов…')
+        test_dir = os.environ.get('CA_TEST_DIR')     # для автоматических тестов программы
+        if not uploads and test_dir:
+            uploads = [(n, open(os.path.join(test_dir, n), 'rb').read()) for n in sorted(os.listdir(test_dir))
+                       if os.path.isfile(os.path.join(test_dir, n))]
+        res = loader.load_all(uploads=uploads,
+                              table_region=x_region, rr_layout=rr_layout, prefer=x_mode, mapping=mapping,
+                              progress=lambda f, n: bar.progress(min(1.0, f), text=f'Чтение: {n}'))
+        bar.empty()
+        if not res['data']:
+            st.error('Данные не найдены: среди загруженных файлов нет файлов станционного формата или таблиц.')
+            return
+        S.raw = res
+        S.x_map = res['mapping']
+        stt = readers.build_station_table(res['index_files'], res['data'])
+        nm = res['table_names']
+        if len(nm):
+            stt['name'] = np.where(stt['name'].astype(str) == stt['st'].astype(str),
+                                   stt['st'].map(nm).fillna(stt['name']), stt['name'])
+        S.stations = numeric_stations(stt)
+        refresh_names()
+        for k in ['checks', 'qc_log', 'clean', 'flags', 'filled', 'fill_log', 'cv', 'D', 'ann', 'events', 'zoning']:
+            S[k] = None
+
+    if st.button('Прочитать данные', type='primary'):
+        if not ups and not os.environ.get('CA_TEST_DIR'):
+            st.error('Загрузите файлы или архивы.')
+        else:
             try:
-                files = xlsx_daily.collect_files([(u.name, u.getvalue()) for u in xups])
-                S.x_files = files
-                grid, merged = xlsx_daily._read_grid(files[0][1], files[0][0])
-                names, _, _ = xlsx_daily.detect_header(grid, merged)
-                S.x_map = xlsx_daily.match_columns(names)
-                st.success(f'Файлов: {len(files)}. Сопоставление построено по «{files[0][0]}».')
+                _read(uploads=[(u.name, u.getvalue()) for u in ups] if ups else None)
+                S.x_uploads = [(u.name, u.getvalue()) for u in ups] if ups else None
             except Exception as e:
-                st.error(str(e))
-        if S.get('x_map') is not None:
-            opts = ['—'] + [r[2] for r in xlsx_daily.RULES]
-            mp = st.data_editor(S.x_map, hide_index=True, use_container_width=True, key='x_map_ed',
-                                column_config={'Показатель': st.column_config.SelectboxColumn(options=opts),
-                                               'Столбец': st.column_config.NumberColumn(disabled=True),
-                                               'Заголовок': st.column_config.TextColumn(disabled=True)})
-            if st.button('Прочитать таблицы', type='primary'):
-                mp = mp.assign(Описание=mp['Показатель'].map(xlsx_daily.STD_LABEL).fillna('не используется'))
-                S.x_map = mp
-                bar = st.progress(0.0)
-                daily, _, xnotes = xlsx_daily.load_tables(S.x_files, mp,
-                                                          progress=lambda f, n: bar.progress(f, text=n))
-                bar.empty()
-                if daily.empty:
-                    st.error('Данные не прочитаны: ' + '; '.join(xnotes[:5]))
-                else:
-                    extra = xlsx_daily.to_program_vars(daily, x_region)
-                    if S.raw and x_mode != 'only':
-                        data = xlsx_daily.merge_datasets(S.raw['data'], extra,
-                                                         prefer='main' if x_mode == 'main' else 'tables')
-                        files_reg, idx = S.raw['files'], S.raw['index_files']
-                    else:
-                        data, files_reg, idx = extra, pd.DataFrame(), []
-                    reg = pd.DataFrame([dict(Файл=n, Переменная='таблица', Регион=x_region) for n, _ in S.x_files])
-                    S.raw = dict(data=data, files=pd.concat([files_reg, reg], ignore_index=True),
-                                 notes=(S.raw['notes'] if S.raw and x_mode != 'only' else []) + xnotes,
-                                 index_files=idx)
-                    old = S.stations
-                    stt = readers.build_station_table(idx, data, old)
-                    nm = daily.groupby('st')['name'].first() if 'name' in daily else pd.Series(dtype=str)
-                    stt['name'] = np.where(stt['name'].astype(str) == stt['st'].astype(str),
-                                           stt['st'].map(nm).fillna(stt['name']), stt['name'])
-                    S.stations = numeric_stations(stt)
-                    refresh_names()
-                    for k in ['checks', 'qc_log', 'clean', 'flags', 'filled', 'fill_log', 'cv', 'D', 'ann',
-                              'events', 'zoning']:
-                        S[k] = None
-                    summ = pd.DataFrame([dict(Показатель=xlsx_daily.STD_LABEL.get(c, c), Значений=int(daily[c].notna().sum()),
-                                              Мин=daily[c].min(), Макс=daily[c].max())
-                                         for c in daily.columns if c not in ('st', 'name', 'date')])
-                    st.success(f'Прочитано суток: {len(daily)}; станций: {daily["st"].nunique()}; '
-                               f'период {daily["date"].min():%d.%m.%Y}–{daily["date"].max():%d.%m.%Y}.')
-                    show_df(summ, 1)
-                    for n in xnotes:
-                        st.caption(n)
+                st.error(f'Ошибка чтения: {e}')
     if S.raw:
         res = S.raw
+        st.subheader('Состав загруженных данных')
+        if 'summary' in res:
+            show_df(res['summary'], 0)
+        nv = pd.DataFrame([{'Переменная': v, 'Станций': d['st'].nunique(), 'Суток': len(d),
+                            'Начало': d['date'].min().strftime('%d.%m.%Y'), 'Конец': d['date'].max().strftime('%d.%m.%Y'),
+                            'Регионы': ', '.join(sorted(d['region'].dropna().astype(str).unique()))}
+                           for v, d in res['data'].items()])
+        show_df(nv, 0)
+        if res.get('compare') is not None and len(res['compare']):
+            st.markdown('**Сверка источников** (совпадающие станции и даты в файлах станционного формата и в таблицах)')
+            show_df(res['compare'], 2)
+            footnote('Средняя абсолютная разность и доля суток, где значения источников расходятся больше чем на '
+                     '0,5 °C (температура) или 0,5 мм (осадки). Заметные расхождения Tмин и Tмакс обычно связаны с '
+                     'разными интервалами определения экстремумов (полусутки или сутки). В объединённый ряд '
+                     'берётся значение источника, выбранного в параметрах чтения; второй дополняет пропуски.')
+        if res.get('tables'):
+            with st.expander('Сопоставление заголовков таблиц с показателями', expanded=False):
+                st.caption('Сопоставление построено автоматически по первой таблице. Если показатель определён '
+                           'неверно, исправьте его и прочитайте данные заново.')
+                opts = ['—'] + [r[2] for r in xlsx_daily.RULES]
+                mp = st.data_editor(S.x_map, hide_index=True, width='stretch', key='x_map_ed',
+                                    column_config={'Показатель': st.column_config.SelectboxColumn(options=opts),
+                                                   'Столбец': st.column_config.NumberColumn(disabled=True),
+                                                   'Заголовок': st.column_config.TextColumn(disabled=True),
+                                                   'Описание': st.column_config.TextColumn(disabled=True)})
+                if st.button('Прочитать заново с этим сопоставлением'):
+                    try:
+                        mp = mp.assign(Описание=mp['Показатель'].map(xlsx_daily.STD_LABEL).fillna('не используется'))
+                        _read(mapping=mp, uploads=S.get('x_uploads'))
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f'Ошибка чтения: {e}')
         st.subheader('Реестр файлов')
         show_df(res['files'], 0, height=240)
         if res['notes']:
@@ -352,8 +371,9 @@ with tabs[0]:
         st.caption('Регионы в данных: ' + ', '.join(f'{r} ({int((S.stations["region"] == r).sum())} ст.)'
                                                       for r in regions()) +
                    '. Регион определяется по имени файла (…nsk… — НСО, …omsk… — Омская обл., иначе — '
-                   'буквенная часть имени); его можно изменить в таблице.')
-        ed = st.data_editor(numeric_stations(S.stations), use_container_width=True, hide_index=True, key='st_editor',
+                   'буквенная часть имени), для таблиц Excel/CSV — по индексу станции или по параметрам чтения; '
+                   'его можно изменить в таблице.')
+        ed = st.data_editor(numeric_stations(S.stations), width='stretch', hide_index=True, key='st_editor',
                             column_config={'st': st.column_config.NumberColumn('Индекс', disabled=True, format='%d'),
                                            'name': 'Название', 'region': 'Регион',
                                            'lat': st.column_config.NumberColumn('Широта', format='%.2f'),
@@ -371,6 +391,40 @@ with tabs[0]:
             for k in ['checks', 'qc_log', 'clean', 'flags', 'filled', 'fill_log', 'cv', 'D', 'ann', 'events', 'zoning']:
                 S[k] = None
             st.success('Справочник сохранён. Результаты следующих этапов сброшены — выполните их заново.')
+
+        st.subheader('Границы сезонов по регионам')
+        st.markdown('Сроки сезонов зависят от климата региона и используются при контроле качества, расчёте '
+                    'полноты и показателей. Значения по умолчанию заданы для юга Западной Сибири; для другого '
+                    'региона проверьте и при необходимости измените их.')
+        for rg in regions():
+            P.seasons_for(rg)
+        rows = []
+        for key, lab in P.SEASON_LABELS.items():
+            r = {'Код': key, 'Сезон': lab}
+            for rg in regions():
+                a_, b_ = P.SEASONS[rg][key]
+                r[f'{rg}: начало'] = MONTHS_RU[a_ - 1]
+                r[f'{rg}: окончание'] = MONTHS_RU[b_ - 1]
+            rows.append(r)
+        cc = {'Код': None, 'Сезон': st.column_config.TextColumn(disabled=True, width='large')}
+        for rg in regions():
+            for part in ('начало', 'окончание'):
+                cc[f'{rg}: {part}'] = st.column_config.SelectboxColumn(options=MONTHS_RU, required=True)
+        sez = st.data_editor(pd.DataFrame(rows), hide_index=True, width='stretch', key='season_ed',
+                             column_config=cc)
+        changed = False
+        for _, r in sez.iterrows():
+            for rg in regions():
+                v = (MONTHS_RU.index(r[f'{rg}: начало']) + 1, MONTHS_RU.index(r[f'{rg}: окончание']) + 1)
+                if P.SEASONS[rg][r['Код']] != v:
+                    P.SEASONS[rg][r['Код']] = v
+                    changed = True
+        if changed:
+            for k in ['checks', 'qc_log', 'clean', 'flags', 'filled', 'fill_log', 'cv', 'D', 'ann', 'events', 'zoning']:
+                S[k] = None
+            st.info('Границы сезонов изменены. Результаты следующих этапов сброшены — выполните их заново.')
+        footnote('Сезон, переходящий через новый год (например, ноябрь–март), относится к году окончания: '
+                 'зима 2016/17 г. — 2017 г. Отопительный год используется только для расчёта ГСОП.')
 
 # ═══════════════════════════ 2. ПРОВЕРКА ═════════════════════════════════
 with tabs[1]:
@@ -395,11 +449,12 @@ with tabs[1]:
                 with tab:
                     st.subheader('Проверка формата и согласованности')
                     chk = S.checks[rg].copy()
-                    chk['Значение'] = chk['Значение'].map(lambda v: cf(v, 2) if isinstance(v, float) else v)
+                    chk['Значение'] = chk['Значение'].map(lambda v: (cf(v, 0) if float(v).is_integer() else cf(v, 2))
+                                                          if isinstance(v, (int, float, np.number)) and np.isfinite(v) else v)
                     st.dataframe(chk.style.apply(
                         lambda r: ['background-color: #FDECEA' if r['Статус'] == 'ошибка' else
                                    ('background-color: #FFF4E0' if r['Статус'] == 'внимание' else '') for _ in r],
-                        axis=1), use_container_width=True, hide_index=True)
+                        axis=1), width='stretch', hide_index=True)
                     save_table(f'table_01_проверка_согласованности_{rg}', S.checks[rg])
                     footnote('Статус: «норма» — расхождений нет или они в допустимых пределах; «внимание» — есть '
                              'значения, которые обрабатываются на этапе контроля качества; «ошибка» — вероятно '
@@ -412,7 +467,8 @@ with tabs[1]:
                     summ.columns = ['Переменная', 'Средняя полнота, %', 'Наименьшая полнота, %']
                     show_df(summ, 1)
                     save_table(f'table_02_полнота_{rg}', cr, 1)
-                    footnote('Полнота — доля суток с данными от числа календарных суток года (для FR — апрель–октябрь). '
+                    footnote(f'Полнота — доля суток с данными от числа календарных суток года (для класса пожарной опасности FR — '
+                             f'пожароопасный сезон региона, {season_txt(rg, "fire")}). '
                              'На карте подписаны значения меньше 100 %.')
                     st.subheader('Пропуски по всей сети региона')
                     g = S.gaps[S.gaps['Регион'] == rg] if not S.gaps.empty else S.gaps
@@ -632,7 +688,7 @@ with tabs[4]:
                                   for k, v in P.CRITERIA[rg].items()} for rg in regions()})
         crit.insert(0, 'Критерий', [P.CRITERIA_LABELS.get(k, k) for k in crit.index])
         crit = crit.reset_index().rename(columns={'index': 'Код'})
-        crit_ed = st.data_editor(crit.astype(str), hide_index=True, use_container_width=True, key='crit_ed',
+        crit_ed = st.data_editor(crit.astype(str), hide_index=True, width='stretch', key='crit_ed',
                                  disabled=['Код', 'Критерий'])
         try:
             for rg in regions():
@@ -722,7 +778,7 @@ with tabs[4]:
                     with st.expander('Базовые значения для сравнения (например, по ранее выполненным расчётам)'):
                         base = st.data_editor(pd.DataFrame({'Характеристика': hs['Характеристика'],
                                                             'Базовый период': [None] * len(hs)}),
-                                              hide_index=True, use_container_width=True, key=f'base_heat_{rg}')
+                                              hide_index=True, width='stretch', key=f'base_heat_{rg}')
                         if base['Базовый период'].notna().any():
                             hs = hs.merge(base, on='Характеристика')
                     show_df(hs, 2)
@@ -737,9 +793,9 @@ with tabs[4]:
                     st.subheader('Бездождные периоды и периоды без снегопада')
                     ps = st.slider('Период', yrs[0], yrs[1], yrs, key=f'dp_{rg}') if yrs[0] < yrs[1] else yrs
                     Dp = Dr[Dr['date'].dt.year.between(ps[0] - 1, ps[1])]
-                    for season, kind, ttl in [('тёплый', 'dry', 'Бездождные периоды, тёплый сезон (IV–X)'),
-                                              ('холодный', 'dry', 'Бездождные периоды, холодный сезон (XI–III)'),
-                                              ('холодный', 'nosnow', 'Периоды без снегопада, холодный сезон (XI–III)')]:
+                    for season, kind, ttl in [('тёплый', 'dry', f'Бездождные периоды, тёплый сезон ({season_txt(rg, "warm")})'),
+                                              ('холодный', 'dry', f'Бездождные периоды, холодный сезон ({season_txt(rg, "cold")})'),
+                                              ('холодный', 'nosnow', f'Периоды без снегопада, холодный сезон ({season_txt(rg, "cold")})')]:
                         spl, ok = indices.dry_spells(Dp, season, kind=kind)
                         if ok.empty:
                             continue
@@ -772,7 +828,7 @@ with tabs[4]:
                     ext = S.stations[['st', 'name']].merge(ext, on='st').drop(columns='region')
                     show_df(ext, 1, height=260)
                     save_table(f'table_14_экстремумы_{rg}', ext, 1)
-                    footnote('Tмакс 0,95 обеспеченности — 95-й процентиль суточной Tмакс за июнь–август. Уровни «раз в N '
+                    footnote(f'Tмакс 0,95 обеспеченности — 95-й процентиль суточной Tмакс за летние месяцы ({season_txt(rg, "summer")}). Уровни «раз в N '
                              'лет» — по распределению Гумбеля для годовых максимумов (метод моментов); число случаев АЖ, '
                              'возможное раз в 50 лет, — по распределению Пуассона. При длине ряда < 30 лет оценки '
                              'приближённые.')
@@ -890,7 +946,9 @@ with tabs[6]:
                      f'fig_дендрограмма_{rg}', wide=True)
 
 # ═══════════════════════════ 8. КАРТЫ ════════════════════════════════════
-with tabs[7]:
+@st.fragment
+def maps_tab():
+    """Вкладка карт выполняется отдельно: изменение её настроек не пересчитывает остальные вкладки."""
     st.header('Карты')
     stx = stations_xy()
     if stx is None or stx.empty:
@@ -908,6 +966,13 @@ with tabs[7]:
         terr = c3.multiselect('Граница субъекта на карте', regs_ne, default=[guess] if guess in regs_ne else [],
                               help='Для региона, которого нет в списке соответствий, выберите субъект вручную.')
         rgeom = basemap.region_geometry(terr) if terr else None
+        if S.get('districts_all') and S.get('districts_region') != rg:
+            S.districts_all, S.districts = None, None       # районы другого региона не используются
+        if S.get('districts_all'):
+            if st.checkbox('Граница субъекта — по загруженным районам OpenStreetMap (точнее встроенной)',
+                           value=True, key='osm_border'):
+                from shapely.ops import unary_union
+                rgeom = unary_union([p['geometry'] for p in S.districts_all]).buffer(0)
         sdf = stx[stx['region'] == rg].copy()
         bbox = basemap.bbox_of(rgeom, pad=0.04) if rgeom is not None else basemap.bbox_of(lat=sdf['lat'], lon=sdf['lon'])
         what_opts = ['Только станции']
@@ -957,8 +1022,7 @@ with tabs[7]:
                 field = interp.idw(sdf['lat'], sdf['lon'], sdf[value_col], LAT, LON)
             else:
                 field = interp.nearest(sdf['lat'], sdf['lon'], sdf[value_col], LAT, LON)
-            if rgeom is not None:
-                field = np.where(interp.mask_by_geometry(LAT, LON, rgeom), field, np.nan)
+            # поле считается по всему охвату карты; на картах заливка обрезается точно по границе субъекта
             grid = (LON, LAT)
             with st.expander('Проверка интерполяции (поочерёдное исключение станций)'):
                 cvt = interp.loo_cv(sdf['lat'], sdf['lon'], sdf[value_col],
@@ -966,55 +1030,85 @@ with tabs[7]:
                 show_df(cvt, 2)
                 footnote('Каждая станция по очереди исключается, её значение оценивается по остальным; MAE, RMSE, R² '
                          '— по этим оценкам.')
+        # ── субъект в OpenStreetMap: выбирается из списка, запросы — по идентификатору ──
+        osm_rel = None
+        need_osm = kind in ('Схематическая', 'По административным районам', 'Физическая')
+        with st.expander('Субъект и административные районы по данным OpenStreetMap',
+                         expanded=kind == 'По административным районам'):
+            st.caption('Список субъектов запрашивается в OpenStreetMap по охвату станций региона, поэтому название '
+                       'выбирается, а не вводится вручную. Границы районов загружаются по идентификатору субъекта.')
+            ok_key = f'osm_subj_{rg}'
+            if st.button('Получить список субъектов из OpenStreetMap', key='btn_osm_subj'):
+                try:
+                    with st.spinner('Запрос к Overpass API…'):
+                        S[ok_key] = mapping.list_osm_subjects(basemap.bbox_of(lat=sdf['lat'], lon=sdf['lon'], pad=0.05))
+                except basemap.ServiceError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f'Список субъектов не получен: {e}')
+            subj = S.get(ok_key)
+            if subj is not None and len(subj):
+                names = list(subj['name'])
+                g0 = (terr[0] if terr else str(rg)).lower()
+                stem = g0.split()[0][:5]
+                default = next((i for i, n in enumerate(names) if n.lower() == g0), None)
+                if default is None:
+                    default = next((i for i, n in enumerate(names) if stem and stem in n.lower()), 0)
+                osm_name = st.selectbox('Субъект в OpenStreetMap', names, index=default, key=f'osm_name_{rg}')
+                osm_rel = int(subj.loc[subj['name'] == osm_name, 'id'].iloc[0])
+                cc1, cc2 = st.columns(2)
+                al = cc1.selectbox('Уровень административного деления', [6, 8], key='d_al',
+                                   format_func={6: 'Муниципальные районы и округа (admin_level 6)',
+                                                8: 'Поселения (admin_level 8)'}.get)
+                if cc2.button('Загрузить районы субъекта'):
+                    try:
+                        with st.spinner('Запрос к Overpass API (при первой загрузке до 2 минут)…'):
+                            S.districts_all = mapping.fetch_osm_districts(osm_rel, admin_level=int(al))
+                        S.districts = list(S.districts_all)
+                        S.districts_region = rg
+                        st.success(f'Загружено районов: {len(S.districts_all)}.')
+                    except basemap.ServiceError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(str(e))
+            elif subj is not None:
+                st.warning('В охвате станций не найдено субъектов OpenStreetMap.')
+            gj = st.file_uploader('или свой файл границ районов (GeoJSON)', type=['geojson', 'json'])
+            if gj is not None:
+                S.districts_all = mapping.read_geojson_file(gj.getvalue())
+                S.districts = list(S.districts_all)
+                S.districts_region = rg
+            if S.get('districts_all'):
+                all_names = [p['name'] for p in S.districts_all]
+                sel = st.multiselect('Районы на карте', all_names, default=all_names, key='d_sel',
+                                     help='По умолчанию — все районы субъекта; лишние можно убрать из списка.')
+                S.districts = [p for p in S.districts_all if p['name'] in set(sel)]
+                if st.button('Очистить загруженные районы'):
+                    S.districts_all, S.districts = None, None
+            show_d = st.checkbox('Показывать границы районов', value=bool(S.districts))
         water = None
-        if kind in ('Схематическая', 'По административным районам', 'Физическая'):
+        if need_osm:
             wsrc = st.radio('Реки и озёра', ['Крупные (встроенные, Natural Earth)', 'Подробные (OpenStreetMap)',
                                              'Не показывать'], horizontal=True)
             if wsrc.startswith('Крупные'):
                 water = dict(rivers=basemap.ne_layer('rivers', bbox), lakes=basemap.ne_layer('lakes', bbox))
             elif wsrc.startswith('Подробные'):
-                osm_reg = st.text_input('Название субъекта в OSM', value=terr[0] if terr else '')
+                if osm_rel is None:
+                    st.caption('Выберите субъект в разделе «Субъект и административные районы» выше; без него '
+                               'реки запрашиваются по прямоугольному охвату карты.')
                 if st.button('Загрузить реки и озёра (Overpass API)'):
                     try:
                         with st.spinner('Запрос к Overpass API (до 3 минут при первой загрузке)…'):
-                            S.water = basemap.fetch_osm_water(region_name=osm_reg or None, bbox=bbox)
+                            S.water = basemap.fetch_osm_water(bbox=bbox, rel_id=osm_rel)
                         st.success(f'Рек: {len(S.water["rivers"])}, водоёмов: {len(S.water["lakes"])}.')
-                    except Exception as e:
+                    except basemap.ServiceError as e:
                         st.error(str(e))
+                    except Exception as e:
+                        st.error(f'Реки и озёра не загружены: {e}')
                 water = S.water or dict(rivers=basemap.ne_layer('rivers', bbox), lakes=basemap.ne_layer('lakes', bbox))
         districts = None
-        with st.expander('Границы административных районов', expanded=kind == 'По административным районам'):
-            src_d = st.radio('Источник', ['Overpass API (OpenStreetMap)', 'Свой файл GeoJSON'], horizontal=True)
-            if src_d.startswith('Overpass'):
-                cc1, cc2 = st.columns(2)
-                rn = cc1.text_input('Регион в OSM', value=terr[0] if terr else '', key='d_reg')
-                al = cc2.number_input('admin_level районов', 4, 10, 6)
-                if st.button('Загрузить границы районов'):
-                    try:
-                        key = f'{rn}_{al}'
-                        cp = os.path.join(basemap.CACHE, f'districts_{abs(hash(key))}.pkl')
-                        if os.path.exists(cp):
-                            polys = pickle.load(open(cp, 'rb'))
-                        else:
-                            with st.spinner('Запрос к Overpass API…'):
-                                polys = mapping.fetch_boundaries_overpass(rn, admin_level=int(al))
-                            pickle.dump(polys, open(cp, 'wb'))
-                        S.districts = (S.districts or []) + [p for p in polys
-                                                             if p['name'] not in {q['name'] for q in (S.districts or [])}]
-                        st.success(f'Загружено районов: {len(polys)}.')
-                    except Exception as e:
-                        st.error(str(e))
-            else:
-                gj = st.file_uploader('GeoJSON районов', type=['geojson', 'json'])
-                if gj is not None:
-                    S.districts = mapping.read_geojson_file(gj.getvalue())
-            if S.districts and st.button('Очистить загруженные районы'):
-                S.districts = None
-            show_d = st.checkbox('Показывать границы районов', value=bool(S.districts))
         if show_d and S.districts:
             districts = S.districts
-            if rgeom is not None:
-                districts = [p for p in districts if p['geometry'].representative_point().within(rgeom.buffer(0.02))]
         dem = None
         show_cities = True
         if kind == 'Физическая':
@@ -1028,6 +1122,8 @@ with tabs[7]:
                             bar = st.progress(0.0, text='Загрузка тайлов высот…')
                             S.dem = basemap.fetch_dem(bbox, zoom=zoom, progress=lambda f: bar.progress(f))
                             bar.empty()
+                        except basemap.ServiceError as e:
+                            st.error(str(e))
                         except Exception as e:
                             st.error(f'Не удалось загрузить рельеф: {e}')
                 elif rsrc.startswith('Свой'):
@@ -1118,10 +1214,12 @@ with tabs[7]:
                                              key='cluster' if cluster_col else 'value', alpha=alpha, st=sdf,
                                              st_labels=labels_on, title=title, value_label=vlabel, decimals=dec)
                         show_fig(fig, f'map_подложка_{rg}', kind_='map')
+                    except basemap.ServiceError as e:
+                        st.error(str(e))
                     except Exception as e:
                         st.error(f'Не удалось загрузить подложку: {e}')
             else:
-                from streamlit_folium import st_folium
+                import streamlit.components.v1 as components
                 cap = f'<b>{title}</b><br>'
                 if value_col:
                     cap += (f'Цвет станций и заливка — {vlabel}' + (', поле интерполировано между станциями' if field is
@@ -1133,10 +1231,25 @@ with tabs[7]:
                 m = maps.folium_map(sdf, polys_assigned, key='cluster' if cluster_col else 'value', region_geom=rgeom,
                                     value_col=value_col, value_label=vlabel, cluster_col=cluster_col,
                                     field=field, grid=grid, decimals=dec, caption=cap)
-                st_folium(m, height=560, use_container_width=True)
-                footnote('Слои (подложки, поле, районы, станции) включаются и отключаются в правом верхнем углу карты.')
+                html = m.get_root().render()
+                # карта встраивается как готовая веб-страница: перемещение, масштаб и смена подложки
+                # выполняются в браузере и не запускают пересчёт программы
+                h_px = int(560 * MAP_W / 60)
+                if hasattr(st, 'iframe'):
+                    st.iframe(html, height=h_px)
+                else:
+                    components.html(html, height=h_px, scrolling=False)
+                st.download_button('Скачать интерактивную карту (HTML)', html.encode('utf-8'),
+                                   file_name=f'map_интерактивная_{rg}.html', mime='text/html', key='dl_folium')
+                footnote('Слои (подложки, поле, районы, станции) включаются и отключаются в правом верхнем углу карты. '
+                         'Скачанный файл HTML открывается в любом браузере и работает без программы (для подложек '
+                         'нужен интернет).')
         except Exception as e:
             st.exception(e)
+
+
+with tabs[7]:
+    maps_tab()
 
 # ═══════════════════════════ 9. ЭКСПОРТ ══════════════════════════════════
 with tabs[8]:

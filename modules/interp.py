@@ -169,5 +169,11 @@ def zonal_mean(field, glat, glon, polygons):
     for p in polygons:
         m = shapely.contains_xy(p['geometry'], glon, glat)
         v = field[m]
-        out.append(np.nanmean(v) if m.any() and np.isfinite(v).any() else np.nan)
+        if m.any() and np.isfinite(v).any():
+            out.append(np.nanmean(v))
+        else:
+            # малый район без узлов сетки — значение в ближайшем узле к его внутренней точке
+            c = p['geometry'].representative_point()
+            k = np.nanargmin((glon - c.x) ** 2 + (glat - c.y) ** 2)
+            out.append(np.ravel(field)[k])
     return out

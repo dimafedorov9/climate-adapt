@@ -131,7 +131,7 @@ INDEX_HELP = {
     'Переход10_весна': 'Дата устойчивого перехода средней суточной температуры через 10 °C (метод накопленных '
                        'отклонений: день после минимума суммы (T − 10) в первой половине года).',
     'ГТК': 'Гидротермический коэффициент Селянинова: 10 · ΣR / ΣT за период с T > 10 °C.',
-    'ГСОП': 'Градусо-сутки отопительного периода: Σ(18 − Tср) по дням с Tср ≤ 8 °C (сезон июль–июнь).',
+    'ГСОП': 'Градусо-сутки отопительного периода: Σ(18 − Tср) по дням с Tср ≤ 8 °C (отопительный год региона, по умолчанию июль–июнь).',
     'PRCPTOT': 'Годовая сумма осадков в дни с осадками ≥ 1 мм (ETCCDI).',
     'R10mm': 'Число дней с осадками ≥ 10 мм (ETCCDI).',
     'R20mm': 'Число дней с осадками ≥ 20 мм (ETCCDI).',
@@ -144,11 +144,11 @@ INDEX_HELP = {
     'R35_12ч': 'Число случаев с осадками не менее критерия НЯ «сильный дождь» за 12 ч (ночь или день).',
     'R50_12ч': 'Число случаев с осадками не менее критерия ОЯ «очень сильный дождь» за 12 ч.',
     'R100_48ч': 'Число случаев ОЯ «продолжительный сильный дождь»: сумма за 2–4 полусуток подряд не менее критерия.',
-    'Атм_засуха': 'Не менее 30 суток подряд в мае–сентябре без осадков > 5 мм при средней за период Tмакс > 25 °C.',
+    'Атм_засуха': 'Не менее 30 суток подряд в месяцы оценки засухи (по умолчанию май–сентябрь, задаются по региону) без осадков > 5 мм при средней за период Tмакс > 25 °C.',
     'Суховей_случаев': 'Не менее 3 суток подряд: ветер ≥ 7 м/с, Tмакс > 25 °C, наименьшая влажность ≤ 30 %.',
-    'ИЖ27': 'Число дней июня–августа, когда индекс жары NWS (регрессия Ротфуса, по T и влажности из Td) хотя бы в '
+    'ИЖ27': 'Число дней летних месяцев региона (по умолчанию июнь–август), когда индекс жары NWS (регрессия Ротфуса, по T и влажности из Td) хотя бы в '
             'один срок достиг 27 °C.',
-    'Пож4': 'Число дней апреля–октября с классом пожарной опасности по условиям погоды ≥ 4.',
+    'Пож4': 'Число дней пожароопасного сезона региона (по умолчанию апрель–октябрь) с классом пожарной опасности по условиям погоды ≥ 4.',
     'Снег_дней': 'Число дней с высотой снежного покрова > 0 см.',
     'Ветер15': 'Число дней с максимальной скоростью ветра ≥ 15 м/с.',
 }
@@ -268,11 +268,11 @@ def cold_events(D):
 
 
 def drought_events(D):
-    """Атмосферная засуха: ≥ 30 суток подряд без осадков > 5 мм в мае–сентябре при средней Tмакс > 25 °C."""
+    """Атмосферная засуха: ≥ 30 суток подряд без осадков > 5 мм в месяцы оценки засухи региона при средней Tмакс > 25 °C."""
     a_ = P.ATMOS_DROUGHT
     rows = []
     for st, g in D.groupby('st'):
-        warm = g['month'].between(5, 9).values
+        warm = g['month'].isin(P.season_months(g['region'].iloc[0], 'drought')).values
         rr = g['rr_s'].values
         ok = warm & (rr <= a_['effective_rr'])
         for a, b in runs(ok):
@@ -335,14 +335,18 @@ def heavy_precip_events(D):
     return pd.DataFrame(rows)
 
 
-def _season_of(dates, season):
+def _season_bounds(season, region):
+    return P.seasons_for(region)['warm' if season == 'тёплый' else 'cold']
+
+
+def _season_of(dates, season, region=None):
+    """Принадлежность суток сезону и год сезона (переход через новый год — год окончания)."""
     m = dates.dt.month
-    if season == 'тёплый':
-        a, b = P.WARM_SEASON
+    a, b = _season_bounds(season, region)
+    if a <= b:
         sel = m.between(a, b)
         key = dates.dt.year
     else:
-        a, b = P.COLD_SEASON
         sel = (m >= a) | (m <= b)
         key = dates.dt.year + (m >= a).astype(int)      # зима 2016/17 → 2017
     return sel, key
@@ -360,7 +364,8 @@ def dry_spells(D, season='тёплый', dry_mm=None, kind='dry'):
     rows, ok_rows = [], []
     for st, g in D.groupby('st'):
         g = g.reset_index(drop=True)
-        sel, key = _season_of(g['date'], season)
+        rg0 = g['region'].iloc[0]
+        sel, key = _season_of(g['date'], season, rg0)
         rr = g['rr_s']
         if kind == 'dry':
             cond = (rr < dry_mm)
@@ -370,12 +375,9 @@ def dry_spells(D, season='тёплый', dry_mm=None, kind='dry'):
         cond = cond & rr.notna()
         # сезонная полнота
         for sk, sub in g[sel].groupby(key[sel]):
-            if season == 'тёплый':
-                a_, b_ = P.WARM_SEASON
-                exp_days = (pd.Timestamp(sk, b_, 1) + pd.offsets.MonthEnd(0) - pd.Timestamp(sk, a_, 1)).days + 1
-            else:
-                a_, b_ = P.COLD_SEASON
-                exp_days = (pd.Timestamp(sk, b_, 1) + pd.offsets.MonthEnd(0) - pd.Timestamp(sk - 1, a_, 1)).days + 1
+            a_, b_ = _season_bounds(season, rg0)
+            y0 = sk if a_ <= b_ else sk - 1
+            exp_days = (pd.Timestamp(sk, b_, 1) + pd.offsets.MonthEnd(0) - pd.Timestamp(y0, a_, 1)).days + 1
             miss = 1 - sub['rr_s'].notna().sum() / exp_days
             ok_rows.append(dict(st=st, Сезон=sk, Пропусков=miss, Учтён=miss <= P.SEASON_MAX_MISSING))
         okset = {r['Сезон'] for r in ok_rows if r['st'] == st and r['Учтён']}
@@ -549,7 +551,7 @@ def annual_indices(D, dry_mm=None):
             add(st, rg, yr, 'Ветер25', np.sum(f >= P.WIND_DAYS_THRESHOLDS[2]))
             add(st, rg, yr, 'FMx', np.nanmax(f))
         if 'hi_max' in g:
-            jja = g['month'].between(6, 8).values
+            jja = g['month'].isin(P.season_months(rg, 'summer')).values
             h = g['hi_max'].values[jja]
             if np.isfinite(g['rh_min'].values[jja]).mean() >= 0.85 if 'rh_min' in g else False:
                 add(st, rg, yr, 'ИЖ27', np.sum(h >= 27)); add(st, rg, yr, 'ИЖ32', np.sum(h >= 32))
@@ -575,7 +577,7 @@ def annual_indices(D, dry_mm=None):
             elif np.isfinite(x).any():
                 add(st, rg, yr, code, np.nanmax(x))
         if 'fr' in g:
-            seas = g['month'].between(4, 10).values
+            seas = g['month'].isin(P.season_months(rg, 'fire')).values
             frv = g['fr'].values[seas]
             if np.isfinite(frv).mean() >= 0.7:
                 add(st, rg, yr, 'Пож4', np.sum(frv >= 4)); add(st, rg, yr, 'Пож5', np.sum(frv >= 5))
@@ -587,7 +589,8 @@ def annual_indices(D, dry_mm=None):
     # ГСОП: отопительный сезон июль–июнь, обозначается годом окончания
     for st, g in D.groupby('st'):
         rg = g['region'].iloc[0]
-        key = g['year'] + (g['month'] >= 7).astype(int)
+        m0 = P.seasons_for(rg)['heat_year'][0]
+        key = g['year'] + (g['month'] >= m0).astype(int) if m0 > 1 else g['year']
         for yr, sub in g.groupby(key):
             if len(sub) < 330 or not _complete(sub['tmean'].values):
                 continue
@@ -668,13 +671,13 @@ def gumbel_levels(annual_max, periods=(10, 20, 50)):
 
 
 def extremes_table(D, ann):
-    """По станциям: Tмакс 0,95 обеспеченности (июнь–август), повторяемость годовых максимумов."""
+    """По станциям: Tмакс 0,95 обеспеченности (летние месяцы региона), повторяемость годовых максимумов."""
     rows = []
     for st, g in D.groupby('st'):
         rg = g['region'].iloc[0]
         row = dict(st=st, region=rg)
-        jja = g[g['month'].between(6, 8)]
-        row['Tмакс 0,95 обеспеченности (VI–VIII), °C'] = jja['tmax'].quantile(0.95)
+        jja = g[g['month'].isin(P.season_months(rg, 'summer'))]
+        row['Tмакс 0,95 обеспеченности (летние месяцы), °C'] = jja['tmax'].quantile(0.95)
         a = ann[ann['st'] == st]
         for code, nm in [('TXx', 'Tмакс'), ('RX1day', 'Суточный максимум осадков'), ('FMx', 'Максимум ветра')]:
             x = a[a['Показатель'] == code]['Значение']

@@ -113,6 +113,63 @@ def draw_poly(ax, g, fc='none', ec='#333', lw=0.8, alpha=1.0, zorder=3, hatch=No
                                hatch=hatch))
 
 
+def clip_to(ax, artists, geom):
+    """Обрезка заливки и изолиний точно по границе территории (вместо маски по узлам сетки)."""
+    if geom is None:
+        return
+    from matplotlib.patches import PathPatch
+    from matplotlib.path import Path
+    path = Path.make_compound_path(*[_poly_path(p) for p in _iter_polys(geom)])
+    patch = PathPatch(path, transform=ax.transData, fc='none', ec='none')
+    ax.add_patch(patch)
+    for a in artists:
+        if a is None:
+            continue
+        if hasattr(a, 'set_clip_path'):
+            a.set_clip_path(patch)
+        for c in getattr(a, 'collections', []):
+            c.set_clip_path(patch)
+    return patch
+
+
+def label_contours(ax, cs, geom, decimals):
+    """Подписи изолиний внутри территории: по одной на каждый уровень, в середине участка линии внутри границы."""
+    fmt = lambda v: cf(v, decimals)
+    if geom is None:
+        return ax.clabel(cs, fmt=fmt, fontsize=7)
+    import shapely
+    pts = []
+    try:
+        segs = cs.allsegs
+    except AttributeError:
+        return ax.clabel(cs, fmt=fmt, fontsize=7)
+    inner = geom.buffer(-0.08)
+    for lev_segs in segs:
+        best = None
+        for seg in lev_segs:
+            if len(seg) < 2:
+                continue
+            ins = shapely.contains_xy(inner if not inner.is_empty else geom, seg[:, 0], seg[:, 1])
+            if ins.sum() > (0 if best is None else len(best)):
+                best = seg[ins]
+        if best is not None and len(best):
+            pts.append(tuple(best[len(best) // 2]))
+    if not pts:
+        return []
+    return ax.clabel(cs, fmt=fmt, fontsize=7, manual=pts, inline=True)
+
+
+def inside_values(field, grid, geom):
+    """Значения поля внутри территории — для шкалы цветов."""
+    if geom is None or field is None:
+        return np.ravel(field)
+    import shapely
+    LON, LAT = grid
+    m = shapely.contains_xy(geom.buffer(0.05), LON, LAT)
+    v = np.asarray(field)[m]
+    return v if np.isfinite(v).any() else np.ravel(field)
+
+
 def draw_lines(ax, g, color=WATER, lw=0.8, zorder=4, alpha=1.0):
     if g is None:
         return
@@ -244,7 +301,8 @@ def map_schematic(st, region_geom, bbox, cluster_col=None, value_col=None, value
         cl = sorted(st[cluster_col].dropna().unique())
         colors = {c: CLUSTER_COLORS[i % len(CLUSTER_COLORS)] for i, c in enumerate(cl)}
     elif value_col:
-        cm, norm, levels = _value_norm(st[value_col] if field is None else np.r_[st[value_col].values, np.ravel(field)],
+        cm, norm, levels = _value_norm(st[value_col] if field is None else
+                                       np.r_[st[value_col].values, inside_values(field, grid, region_geom)],
                                        cmap, n_levels)
     if mode == 'thiessen' and (cluster_col or value_col):
         cells = thiessen(st, region_geom)
@@ -259,11 +317,13 @@ def map_schematic(st, region_geom, bbox, cluster_col=None, value_col=None, value
         if cluster_col:
             cl_levels = np.arange(min(colors) - 0.5, max(colors) + 1.5)
             cmc = ListedColormap([colors[c] for c in sorted(colors)])
-            ax.contourf(LON, LAT, F, levels=cl_levels, cmap=cmc, alpha=0.9, zorder=2)
+            cf_ = ax.contourf(LON, LAT, F, levels=cl_levels, cmap=cmc, alpha=0.9, zorder=2)
+            clip_to(ax, [cf_], region_geom)
         else:
-            ax.contourf(LON, LAT, F, levels=levels, cmap=cm, norm=norm, zorder=2, extend='both')
+            cf_ = ax.contourf(LON, LAT, F, levels=levels, cmap=cm, norm=norm, zorder=2, extend='both')
             cs = ax.contour(LON, LAT, F, levels=levels, colors='#333', linewidths=0.4, zorder=3)
-            ax.clabel(cs, fmt=lambda v: cf(v, decimals), fontsize=7)
+            clip_to(ax, [cf_, cs], region_geom)
+            label_contours(ax, cs, region_geom, decimals)
     if districts:
         for d in districts:
             draw_poly(ax, d['geometry'], ec='#777', lw=0.4, zorder=5)
@@ -371,10 +431,12 @@ def map_physical(bbox, region_geom=None, dem=None, dem_extent=None, water=None, 
     if field is not None:
         LON, LAT = grid
         F = np.ma.masked_invalid(field)
-        cm, norm, levels = _value_norm(F.compressed(), cmap, n_levels)
-        ax.contourf(LON, LAT, F, levels=levels, cmap=cm, norm=norm, alpha=field_alpha, zorder=2, extend='both')
+        vin = inside_values(field, grid, region_geom)
+        cm, norm, levels = _value_norm(vin[np.isfinite(vin)], cmap, n_levels)
+        cf_ = ax.contourf(LON, LAT, F, levels=levels, cmap=cm, norm=norm, alpha=field_alpha, zorder=2, extend='both')
         cs = ax.contour(LON, LAT, F, levels=levels, colors='#333', linewidths=0.45, zorder=3)
-        ax.clabel(cs, fmt=lambda v: cf(v, decimals), fontsize=7)
+        clip_to(ax, [cf_, cs], region_geom)
+        label_contours(ax, cs, region_geom, decimals)
     if clusters:
         cl = sorted({c['cluster'] for c in clusters if c.get('cluster') is not None})
         colors = {c: CLUSTER_COLORS[i % len(CLUSTER_COLORS)] for i, c in enumerate(cl)}
@@ -484,7 +546,8 @@ def folium_map(st, polys=None, key='cluster', region_geom=None, value_col=None, 
     if value_col and value_col in st:
         vals_all = list(st[value_col].dropna().values)
         if field is not None:
-            vals_all += list(np.asarray(field)[np.isfinite(field)].ravel())
+            vin = inside_values(field, grid, region_geom)
+            vals_all += list(vin[np.isfinite(vin)])
         lo, hi = float(np.nanmin(vals_all)), float(np.nanmax(vals_all))
         if hi == lo:
             hi = lo + 1
@@ -495,10 +558,28 @@ def folium_map(st, polys=None, key='cluster', region_geom=None, value_col=None, 
     if field is not None and cmap_v is not None:
         LON, LAT = grid
         F = np.asarray(field, float)
+        # растр уточняется в 6 раз, строки располагаются равномерно в проекции Меркатора (как у подложки),
+        # затем обрезается точно по границе — заливка доходит до границы без «ступенек» и смещений
+        from scipy.interpolate import RegularGridInterpolator
+        lon0 = LON[0, :]
+        lat0 = LAT[:, 0]
+        if lat0[0] > lat0[-1]:
+            lat0, F = lat0[::-1], F[::-1]
+        Ff = np.where(np.isfinite(F), F, np.nanmean(F))
+        itp = RegularGridInterpolator((lat0, lon0), Ff, bounds_error=False, fill_value=None)
+        merc = lambda la: np.log(np.tan(np.pi / 4 + np.radians(la) / 2))
+        imerc = lambda y: np.degrees(2 * np.arctan(np.exp(y)) - np.pi / 2)
+        ny, nx = len(lat0) * 6, len(lon0) * 6
+        lat_f = imerc(np.linspace(merc(lat0.max()), merc(lat0.min()), ny))     # сверху вниз
+        lon_f = np.linspace(lon0.min(), lon0.max(), nx)
+        LON, LAT = np.meshgrid(lon_f, lat_f)
+        F = itp(np.c_[LAT.ravel(), LON.ravel()]).reshape(LAT.shape)
+        if region_geom is not None:
+            import shapely
+            F = np.where(shapely.contains_xy(region_geom, LON, LAT), F, np.nan)
         norm = (F - cmap_v.vmin) / (cmap_v.vmax - cmap_v.vmin)
         rgba = plt.get_cmap('viridis')(np.clip(norm, 0, 1))
-        rgba[..., 3] = np.where(np.isfinite(F), 0.65, 0)
-        rgba = rgba[::-1] if LAT[0, 0] < LAT[-1, 0] else rgba
+        rgba[..., 3] = np.where(np.isfinite(F), 0.75, 0)
         buf = io.BytesIO()
         plt.imsave(buf, rgba, format='png')
         url = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()

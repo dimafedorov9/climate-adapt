@@ -94,7 +94,7 @@ def _cache_path(key, ext):
     return os.path.join(CACHE, hashlib.md5(key.encode()).hexdigest() + ext)
 
 
-def fetch_osm_water(region_name=None, bbox=None, timeout=180, min_lake_km2=1.0):
+def fetch_osm_water(region_name=None, bbox=None, timeout=180, min_lake_km2=1.0, rel_id=None):
     """
     Реки (waterway=river) и водоёмы (natural=water) из OpenStreetMap через
     Overpass API — по названию субъекта (как в OSM) или по bbox.
@@ -102,7 +102,10 @@ def fetch_osm_water(region_name=None, bbox=None, timeout=180, min_lake_km2=1.0):
     """
     import requests
     from .mapping import OVERPASS_ENDPOINTS
-    if region_name:
+    if rel_id:
+        area = f'area({3600000000 + int(rel_id)})->.a;'
+        sel = '(area.a)'
+    elif region_name:
         area = f'area["name"="{region_name}"]["admin_level"="4"]->.a;'
         sel = '(area.a)'
     else:
@@ -117,18 +120,8 @@ out geom;"""
     if os.path.exists(cp):
         data = json.load(open(cp, encoding='utf-8'))
     else:
-        last = None
-        data = None
-        for url in OVERPASS_ENDPOINTS:
-            try:
-                r = requests.post(url, data={'data': q}, timeout=timeout + 20, headers=UA)
-                r.raise_for_status()
-                data = r.json()
-                break
-            except Exception as e:  # noqa
-                last = e
-        if data is None:
-            raise RuntimeError(f'Overpass API недоступен: {last}')
+        from .mapping import overpass
+        data = overpass(q, timeout)
         json.dump(data, open(cp, 'w', encoding='utf-8'))
     rivers, lakes = [], []
     for el in data.get('elements', []):
@@ -178,14 +171,43 @@ def _num2lat(y, z):
     return np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * y / n))))
 
 
+class ServiceError(RuntimeError):
+    """Ошибка внешнего картографического сервиса (не программы)."""
+
+
+def service_message(service, e):
+    """Понятное сообщение о сбое внешнего сервиса с указанием причины."""
+    import requests
+    code = getattr(getattr(e, 'response', None), 'status_code', None)
+    if isinstance(e, requests.exceptions.Timeout) or 'timed out' in str(e).lower():
+        why = 'сервер не ответил за отведённое время (перегружен)'
+    elif isinstance(e, requests.exceptions.ConnectionError):
+        why = 'нет соединения с сервером (сервер недоступен или нет доступа в интернет)'
+    elif code == 429:
+        why = 'сервер ограничил число запросов (HTTP 429)'
+    elif code in (502, 503, 504):
+        why = f'сервер перегружен или на обслуживании (HTTP {code})'
+    elif code:
+        why = f'сервер вернул ошибку HTTP {code}'
+    else:
+        why = str(e)[:200]
+    return (f'Ошибка на стороне внешнего сервиса «{service}»: {why}. Это не ошибка программы и не ошибка '
+            f'загруженных данных. Повторите попытку через несколько минут; уже полученные данные сохраняются '
+            f'и повторно не запрашиваются.')
+
+
 def _get_tile(url_tpl, z, x, y, timeout=30):
     import requests
+    from urllib.parse import urlparse
     url = url_tpl.format(z=z, x=x, y=y)
     cp = _cache_path(url, '.png')
     if os.path.exists(cp):
         return open(cp, 'rb').read()
-    r = requests.get(url, timeout=timeout, headers=UA)
-    r.raise_for_status()
+    try:
+        r = requests.get(url, timeout=timeout, headers=UA)
+        r.raise_for_status()
+    except Exception as e:
+        raise ServiceError(service_message(f'сервер тайлов {urlparse(url).netloc}', e)) from None
     open(cp, 'wb').write(r.content)
     return r.content
 

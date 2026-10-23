@@ -56,6 +56,7 @@ RULES = {
     'TX1': 'Внутренняя согласованность: Tмин > Tмакс',
     'TX2': 'Внутренняя согласованность: Tмакс − Tср > 15 °C',
     'TX3': 'Внутренняя согласованность: вероятная ошибка знака',
+    'TX4': 'Внутренняя согласованность: Tср вне интервала [Tмин; Tмакс]',
     'RS1': 'Внутренняя согласованность: точка росы выше температуры',
     'RH1': 'Проверка допустимости: влажность > 100 %',
     'TS1': 'Код вместо значения (±90…99)',
@@ -86,6 +87,9 @@ RULE_HELP = {
            'с соседями).',
     'TX2': 'Tмакс превышает среднюю за сутки больше чем на 15 °C (летом такие разности практически не встречаются).',
     'TX3': 'Зимой Tмакс > +15 °C при отрицательной средней — вероятно, потерян знак «минус».',
+    'TX4': 'Средняя суточная температура ниже минимальной или выше максимальной более чем на 1 °C. Обычно связано с '
+           'разными интервалами осреднения (экстремумы — за полусутки, средняя — по восьми срокам); значение остаётся '
+           'в ряду с признаком «требует проверки».',
     'RS1': 'Точка росы не может быть выше температуры воздуха в тот же срок (допуск 0,5 °C).',
     'RH1': 'Относительная влажность больше 100 %.',
     'TS1': 'Значения −90…−99 и +90…+99 в температуре поверхности почвы — коды, а не измерения.',
@@ -262,8 +266,10 @@ def qc_tx(df, stations, log, opts):
     # Tмакс − Tср > 15
     big = (tmax - tmean) > P.TMAX_MINUS_TMEAN_MAX
     log.add_mask('TX', 'tmax', tmax, big, REJECT, 'TX2', note='Tмакс − Tср > 15 °C')
+    out_mean = ((tmin > tmean + 1) | (tmean > tmax + 1)) & ~(tmin > tmax)
+    log.add_mask('TX', 'tmean', tmean, out_mean, SUSPECT, 'TX4', note='Tср вне [Tмин; Tмакс] более чем на 1 °C')
     # ошибка знака: зимой Tмакс > +15 при оценке по соседям ниже 0
-    winter = pd.DataFrame(np.repeat(np.isin(tmax.index.month, [11, 12, 1, 2, 3])[:, None], tmax.shape[1], 1),
+    winter = pd.DataFrame(np.repeat(np.isin(tmax.index.month, P.season_months(opts.get('region'), 'cold'))[:, None], tmax.shape[1], 1),
                           index=tmax.index, columns=tmax.columns)
     sign = winter & (tmax > 15) & (tmean < 0)
     if opts.get('correct_sign', False):
@@ -330,14 +336,14 @@ def qc_rr(df, stations, log, opts):
     s = M['rr_s']
     nb = _distance_neighbors(stations, s.columns, M=s)
     months = s.index.month
-    warm = pd.DataFrame(np.repeat(np.isin(months, P.RR_WARM_MONTHS)[:, None], s.shape[1], 1),
+    warm = pd.DataFrame(np.repeat(np.isin(months, P.season_months(opts.get('region'), 'summer'))[:, None], s.shape[1], 1),
                         index=s.index, columns=s.columns)
     for c in M:
         check_limits('RR', c, M[c], log)
         thr = warm * P.RR_MAX_WARM + (~warm) * P.RR_MAX_COLD
         over = (M[c] >= thr) & warm | (M[c] > thr) & ~warm
         log.add_mask('RR', c, M[c], over, REJECT, 'RR1',
-                     note='> 100 мм вне лета / ≥ 150 мм летом')
+                     note=f'> {P.RR_MAX_COLD:g} мм вне летних месяцев / ≥ {P.RR_MAX_WARM:g} мм в летние месяцы')
     # если суточная сумма забракована — полусуточные значения тоже
     over_s = ((s >= P.RR_MAX_WARM) & warm) | ((s > P.RR_MAX_COLD) & ~warm)
     for c in ('rr_n', 'rr_d'):
@@ -470,7 +476,7 @@ def run_qc(data, stations, opts=None, progress=None):
         log = Log()
         sub = {v: d[d['region'] == rg] for v, d in data.items() if v != 'DY'}
         st_r = stations[stations['region'] == rg] if 'region' in stations else stations
-        k0 += _run_region(sub, st_r, opts, log, progress, k0, ntot)
+        k0 += _run_region(sub, st_r, {**opts, 'region': rg}, log, progress, k0, ntot)
         f = log.frame()
         if not f.empty:
             f.insert(0, 'Регион', rg)

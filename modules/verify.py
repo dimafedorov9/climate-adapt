@@ -15,8 +15,10 @@
 
 import numpy as np
 import pandas as pd
+import params as P
 
 from .spatial import to_matrix
+from config import cf
 
 MAIN_COMP = {'TT': None, 'TX': 'tmean', 'RR': 'rr_s', 'FM': 'fm_s', 'TS': 'ts00',
              'RS': None, 'RH': None, 'FR': 'fr'}
@@ -50,12 +52,13 @@ def completeness(data, freq='Y'):
         d['ok'] = ok.values
         d['year'] = d['date'].dt.year
         if var == 'FR':
-            d = d[d['date'].dt.month.isin(MONTHS_FR)]
+            fr_m = d['region'].map(lambda r: tuple(P.season_months(r, 'fire')))
+            d = d[[m in ms for m, ms in zip(d['date'].dt.month, fr_m)]]
         # знаменатель — все календарные дни периода наблюдений файла
         g = d.groupby(['region', 'st', 'year'])
         for (rg, st, yr), sub in g:
             if var == 'FR':
-                ndays = sum(pd.Period(f'{yr}-{m:02d}').days_in_month for m in MONTHS_FR)
+                ndays = sum(pd.Period(f'{yr}-{m:02d}').days_in_month for m in P.season_months(rg, 'fire'))
             else:
                 last = min(pd.Timestamp(yr, 12, 31), df['date'].max())
                 ndays = (last - pd.Timestamp(yr, 1, 1)).days + 1
@@ -81,7 +84,7 @@ def network_gaps(data, share=0.5, min_len=1):
             M = sub.pivot_table(index='date', columns='st', values='miss', aggfunc='first')
             M = M.reindex(full_idx).fillna(True).astype(float)
             if var == 'FR':
-                M = M[M.index.month.isin(MONTHS_FR)]
+                M = M[M.index.month.isin(P.season_months(rg, 'fire'))]
             frac = M.mean(axis=1)
             bad = frac > share
             if not bad.any():
@@ -110,18 +113,18 @@ def consistency_checks(data, stations=None):
         m = w[['rr_n', 'rr_d', 'rr_s']].notna().all(1) & (w['rr_s'] > 0)
         share = ((w.loc[m, 'rr_n'] + w.loc[m, 'rr_d'] - w.loc[m, 'rr_s']).abs() <= 1.05).mean() if m.any() else np.nan
         st = 'норма' if share >= 0.95 else ('внимание' if share >= 0.8 else 'ошибка')
-        out.append(_check('Формат RR: ночь + день = сутки (± 1 мм), % суток', share * 100, st,
+        out.append(_check('Формат файла осадков (RR): ночь + день = сутки (± 1 мм), % суток', share * 100, st,
                           'Доля суток с осадками, где сумма полусуток совпадает с суточной. '
                           'Низкое значение указывает на иную раскладку значений в строке.'))
         n_tr = int(w[['rr_n_tr', 'rr_d_tr', 'rr_s_tr']].sum().sum())
-        out.append(_check('Формат RR: значений «следы осадков»', n_tr, 'норма',
+        out.append(_check('Формат файла осадков (RR): значений «следы осадков»', n_tr, 'норма',
                           'Код «0»; учитываются как 0 мм с признаком следов.'))
     # FM: сутки = max(ночь, день)
     if 'FM' in data:
         w = data['FM']
         m = w[['fm_n', 'fm_d', 'fm_s']].notna().all(1)
         share = (w.loc[m, 'fm_s'] == w.loc[m, ['fm_n', 'fm_d']].max(1)).mean() if m.any() else np.nan
-        out.append(_check('Формат FM: сутки = наибольшее из ночи и дня, % суток', share * 100,
+        out.append(_check('Формат файла ветра (FM): сутки = наибольшее из ночи и дня, % суток', share * 100,
                           'норма' if share >= 0.98 else 'внимание',
                           'Проверка раскладки файла ветра.'))
     # TT против TX
@@ -135,30 +138,37 @@ def consistency_checks(data, stations=None):
         mm = mm.dropna()
         if len(mm) > 100:
             r = np.corrcoef(mm['m8'], mm['tmean'])[0, 1]
-            out.append(_check('Согласованность TT и TX: r среднего из 8 сроков и Tср', r,
+            out.append(_check('Согласованность температуры по срокам (TT) и суточной температуры (TX): коэффициент корреляции среднего из 8 сроков и средней суточной', r,
                               'норма' if r > 0.97 else 'внимание',
                               'Подтверждает чтение TT и TX по датам (сроки внутри даты).'))
             share = ((mm['tmin'] - mm['min8']) > 3).mean()
-            out.append(_check('Согласованность TT и TX: Tмин выше минимума сроков > 3 °C, %', share * 100,
+            out.append(_check('Согласованность TT и TX: минимальная температура выше наименьшей из 8 сроков более чем на 3 °C, % суток', share * 100,
                               'внимание' if share > 0.05 else 'норма',
                               'Tмин и Tмакс в TX определены по полусуткам; для экстремумов '
                               'используется только TX.'))
         tx = data['TX']
-        bad = ((tx['tmin'] > tx['tmean'] + 1) | (tx['tmean'] > tx['tmax'] + 1)).sum()
-        out.append(_check('Внутренняя согласованность TX: Tср вне [Tмин; Tмакс] (> 1 °C), суток', int(bad),
-                          'внимание' if bad else 'норма', 'Физическая несовместимость значений одних суток.'))
+        nn = int(tx[['tmin', 'tmean', 'tmax']].notna().all(1).sum())
+        bad = int(((tx['tmin'] > tx['tmean'] + 1) | (tx['tmean'] > tx['tmax'] + 1)).sum())
+        out.append(_check('Внутренняя согласованность TX: средняя суточная температура ниже минимальной или выше '
+                          'максимальной более чем на 1 °C, суток', bad,
+                          'внимание' if bad else 'норма',
+                          f'{cf(100 * bad / max(nn, 1), 2)} % из {nn} суток. В пределах одних суток средняя '
+                          'температура должна лежать между минимальной и максимальной. Расхождения возникают, '
+                          'когда величины относятся к разным интервалам (минимум и максимум — за полусутки по '
+                          'ВСВ, средняя — по восьми срокам) или при ошибке записи. На этапе контроля качества '
+                          'такие сутки получают признак «требует проверки» (правило TX4) и не исключаются.'))
     # TS: масштаб
     if 'TS' in data and 'TT' in data:
         ts = data['TS'][['st', 'date', 'ts12']].merge(data['TT'][['st', 'date', 'tt12']], on=['st', 'date']).dropna()
         summer = ts[ts['date'].dt.month == 7]
         if len(summer) > 30:
             med = summer['ts12'].median()
-            out.append(_check('Формат TS: медиана в июле, 12 ВСВ, °C (масштаб 1)', med,
+            out.append(_check('Формат файла температуры поверхности почвы (TS): медиана в июле в 12 ВСВ, °C', med,
                               'норма' if 10 < med < 60 else 'ошибка',
                               'При масштабе ×10 медиана была бы около 1–3 °C, что физически невозможно; '
                               'значения записаны в целых градусах.'))
             r = np.corrcoef(ts['ts12'], ts['tt12'])[0, 1]
-            out.append(_check('Согласованность TS и TT: r в тот же срок', r,
+            out.append(_check('Согласованность температуры почвы (TS) и воздуха (TT): коэффициент корреляции в тот же срок', r,
                               'норма' if r > 0.9 else 'внимание', ''))
     # RS: Td > T
     if 'RS' in data and 'TT' in data:
@@ -170,31 +180,35 @@ def consistency_checks(data, stations=None):
                 ok = m[[f'td{h}', f'tt{h}']].notna().all(1)
                 n_over += int((m.loc[ok, f'td{h}'] > m.loc[ok, f'tt{h}'] + 0.5).sum())
                 n_all += int(ok.sum())
-        out.append(_check('Внутренняя согласованность RS: Td > T (> 0,5 °C), сроков', n_over,
+        out.append(_check('Внутренняя согласованность RS и TT: температура точки росы выше температуры воздуха '
+                          'в тот же срок более чем на 0,5 °C, сроков', n_over,
                           'внимание' if n_over else 'норма',
-                          f'из {n_all} сроков; такие значения исключаются.'))
+                          f'{cf(100 * n_over / max(n_all, 1), 2)} % из {n_all} сроков. Точка росы не может '
+                          'превышать температуру воздуха (насыщение наступает при их равенстве); допуск 0,5 °C '
+                          'учитывает погрешность измерений. На этапе контроля качества такие значения точки росы '
+                          'получают признак «ошибочное» (правило RS1) и в расчётах не используются.'))
     if 'RH' in data:
         rh = data['RH']
         rcols = [c for c in rh.columns if c.startswith('rh')]
         n = int((rh[rcols] > 100).sum().sum())
-        out.append(_check('Допустимость RH: влажность > 100 %, сроков', n, 'внимание' if n else 'норма',
+        out.append(_check('Допустимость относительной влажности (RH): значения больше 100 %, сроков', n, 'внимание' if n else 'норма',
                           'Относительная влажность рассчитывается по T и Td (формула Магнуса); '
                           'файлы RH используются только для сравнения.'))
     if 'FR' in data:
         fr = data['FR']
         n0 = int(fr['fr_notcalc'].sum())
-        out.append(_check('Формат FR: класс 0 (показатель не рассчитывался), дней', n0, 'норма',
+        out.append(_check('Формат файла класса пожарной опасности (FR): класс 0 (не рассчитывался), суток', n0, 'норма',
                           'Показатель не рассчитывался из-за низкой температуры; учитывается как пропуск.'))
     # справочник
     if stations is not None:
         no_xy = stations[stations[['lat', 'lon']].isna().any(axis=1)]
-        out.append(_check('Справочник: станций без координат', len(no_xy), 'внимание' if len(no_xy) else 'норма',
+        out.append(_check('Справочник станций: станций без координат', len(no_xy), 'внимание' if len(no_xy) else 'норма',
                           ', '.join(no_xy['name'].astype(str).head(15))))
         main_vars = [v for v in data if v != 'DY']
         miss_vars = stations[stations['vars'].apply(lambda x: len([v for v in str(x).split(', ') if v in main_vars]))
                              < len(main_vars)]
         if len(miss_vars):
-            out.append(_check('Справочник: станций не во всех переменных', len(miss_vars), 'внимание',
+            out.append(_check('Справочник станций: станций, представленных не во всех файлах', len(miss_vars), 'внимание',
                               '; '.join(f"{r['name']}: {r['vars']}" for _, r in miss_vars.head(8).iterrows())))
     return pd.DataFrame(out)
 
